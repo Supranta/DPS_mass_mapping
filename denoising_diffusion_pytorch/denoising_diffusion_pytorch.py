@@ -539,8 +539,6 @@ class GaussianDiffusion(Module):
 
         alphas = 1. - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
-        print("Saving alpha_bar....")
-        np.save('/home2/supranta/PosteriorSampling/denoising_diffusion_pytorch/denoising_diffusion_pytorch/alpha_bar.npy',alphas_cumprod.detach().numpy())
         alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
 
         timesteps, = betas.shape
@@ -615,8 +613,6 @@ class GaussianDiffusion(Module):
 
         self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
         self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
-
-        self.rt_daps = torch.tensor(np.load('./samples/daps/variance_calculation/rt.npy')[np.newaxis,:,:,np.newaxis,np.newaxis])
 
     @property
     def device(self):
@@ -870,7 +866,6 @@ class GaussianDiffusion(Module):
                     x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
                     lkl_shift = lkl_scale * (1 - alpha_t) * (grad_log_lkl).detach()
                     x_t -= lkl_shift
-                    #if time in [980, 900, 800, 740, 700, 600, 500, 400]:
                     t_list.append(time)
                     imgs.append(x_t)
 
@@ -891,95 +886,10 @@ class GaussianDiffusion(Module):
     def dps_lkl_scale(self, time, delta_t=900, sigma_t=200):
         return 1. / (1. + np.exp(- (-time + delta_t) / sigma_t))
 
-            
-    def ddim_sample_sitcom(self, shape, noisy_image, sigma_noise, return_all_timesteps = False, K = 20, mean = 0, lr = 0.0001, lamb = 0, delta = 1.):
-        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
-        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
-        times = list(reversed(times.int().tolist()))
-        time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
-        x_t = torch.randn(shape, device = device)
-        imgs = [x_t]
-        x_start = torch.zeros(shape, device = device)
-        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
-            x_t.requires_grad = True
-            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
-            self_cond = x_start if self.self_condition else None
-            v_t = x_t.clone().detach().requires_grad_(True)  # Ensure v_t is detached and requires gradients
-            optimizer = torch.optim.Adam([v_t], lr=lr)
-            for k in range(K):
-                #print("k", k)
-                if not v_t.requires_grad:
-                    v_t.requires_grad_(True)
-                # Get predictions from the model
-                pred_noise, v_start, *_ = self.model_predictions(
-                    v_t, time_cond, self_cond, clip_x_start=True, rederive_pred_noise=True
-                )
-                # Compute ||A(v_start) - y||^{2}_{2}
-                kappa_map = self.unnormalize(v_start)
-                kappa_map = self.unnorm_kappa(kappa_map)
-                n_tomo_bins = kappa_map.shape[1]
-                shears = []
-                for i in range(self.channels):
-                    shears_i = (self.torch_kappa_to_shear(kappa_map[:,i].squeeze(0)))               
-                    shears.append(shears_i) 
-                # Define the two terms of the loss
-                loglkl = self.compute_log_lkl(shears, noisy_image, sigma_noise)
-                term1  = loglkl
-                print("Term 1", term1)
-                term2 = self.n_pix * torch.norm(v_t - x_t) ** 2
-                print("Term 2", term2)
-                # Compute the total loss
-                sum_loss = term1 + lamb * term2
-                # Backpropagate the loss
-                optimizer.zero_grad()
-                sum_loss.backward()
-                if term1 < delta * self.n_pix:
-                    break
-                optimizer.step()
-
-            x_t = v_t  # Assign final v_t to x_t after loop completion
-            pred_noise, x_start, *_ = self.model_predictions(x_t, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
-            x_start = x_start #+ mean - torch.mean(x_start.detach().cpu())
-            if time_next < 0:
-                img = x_start
-                imgs.append(img)
-                continue
-            alpha = self.alphas_cumprod[time]
-            alpha_next = self.alphas_cumprod[time_next]
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = (1 - alpha_next - sigma ** 2).sqrt()
-            alpha_t = alpha/alpha_next
-            noise = torch.randn_like(x_t)
-            if(time > 0):
-                with torch.no_grad():
-                    x_t = (x_start * alpha_next.sqrt() + c * pred_noise)
-        ret = x_t if not return_all_timesteps else torch.stack(imgs, dim = 1)
-        ret = self.unnormalize(ret)
-        return ret
-    
-    def sample_sitcom(self, batch_size = 1, return_all_timesteps = False, K = 20, mean = 0, lamb = 0., delta = 1.):
-        print("Sample sitcom called")
-        (h, w), channels = self.image_size, self.channels
-        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_sitcom
-        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps, K = K, mean = mean, lamb=lamb, delta = delta)
-
     def sample_posterior(self, batch_size = 16, return_all_timesteps = False):
         print("Sample Posterior called")
         (h, w), channels = self.image_size, self.channels
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_posterior
-        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps)
-
-    def sample_dmps_posterior(self, batch_size = 16, return_all_timesteps = False):
-        print("Sample DMPS called")
-        (h, w), channels = self.image_size, self.channels
-        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_dmps
-        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps)
-
-    def sample_daps(self, batch_size = 16, return_all_timesteps = False):
-        (h, w), channels = self.image_size, self.channels
-        print(self.is_ddim_sampling)
-        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_daps
-        print('IS DDIM Sampling', self.is_ddim_sampling)
         return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps)
 
     @torch.inference_mode()
@@ -1069,7 +979,7 @@ class GaussianDiffusion(Module):
 # dataset classes
 
 class MassiveNusDataset(Dataset):
-    def __init__(self, folder, exp_transform=False, N_train=5000):
+    def __init__(self, folder, exp_transform=False, N_train=2000):
         super().__init__()
         self.N_train = N_train
         self.folder = folder
