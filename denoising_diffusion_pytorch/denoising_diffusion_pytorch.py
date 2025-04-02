@@ -6,6 +6,8 @@ from functools import partial
 from collections import namedtuple
 from multiprocessing import cpu_count
 
+import numpy as np
+
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
@@ -22,13 +24,15 @@ from einops.layers.torch import Rearrange
 
 from PIL import Image
 from tqdm.auto import tqdm
+from tqdm import trange
 from ema_pytorch import EMA
 
 from accelerate import Accelerator
+from MapTools import TorchMapTools
 
-from denoising_diffusion_pytorch.attend import Attend
+from attend import Attend
 
-from denoising_diffusion_pytorch.version import __version__
+from version import __version__
 
 # constants
 
@@ -465,6 +469,7 @@ def sigmoid_beta_schedule(timesteps, start = -3, end = 3, tau = 1, clamp_min = 1
     better for images > 64x64, when used during training
     """
     steps = timesteps + 1
+    print("START kwarg: %2.5f"%(start))
     t = torch.linspace(0, timesteps, steps, dtype = torch.float64) / timesteps
     v_start = torch.tensor(start / tau).sigmoid()
     v_end = torch.tensor(end / tau).sigmoid()
@@ -486,6 +491,11 @@ class GaussianDiffusion(Module):
         schedule_fn_kwargs = dict(),
         ddim_sampling_eta = 0.,
         auto_normalize = True,
+        noisy_image = None,
+        kappa_min = None,
+        kappa_max = None, 
+        exp_transform = False, 
+        sigma_noise = None, 
         offset_noise_strength = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
         min_snr_loss_weight = False, # https://arxiv.org/abs/2303.09556
         min_snr_gamma = 5
@@ -498,12 +508,20 @@ class GaussianDiffusion(Module):
 
         self.channels = self.model.channels
         self.self_condition = self.model.self_condition
-
+        self.noisy_image = noisy_image
+        self.kappa_min = torch.tensor(kappa_min).to('cuda:0')
+        self.kappa_max = torch.tensor(kappa_max).to('cuda:0')
+        self.sigma_noise = sigma_noise
+        self.exp_transform = exp_transform
+        if(self.exp_transform):
+            self.shift = 1.1 * self.kappa_min
+            self.y_min = torch.log(self.kappa_min - self.shift)
+            self.y_max = torch.log(self.kappa_max - self.shift)
         if isinstance(image_size, int):
             image_size = (image_size, image_size)
         assert isinstance(image_size, (tuple, list)) and len(image_size) == 2, 'image size must be a integer or a tuple/list of two integers'
         self.image_size = image_size
-
+        self.n_pix = self.channels * self.image_size[0] * self.image_size[1]
         self.objective = objective
 
         assert objective in {'pred_noise', 'pred_x0', 'pred_v'}, 'objective must be either pred_noise (predict noise) or pred_x0 (predict image start) or pred_v (predict v [v-parameterization as defined in appendix D of progressive distillation paper, used in imagen-video successfully])'
@@ -521,6 +539,8 @@ class GaussianDiffusion(Module):
 
         alphas = 1. - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
+        print("Saving alpha_bar....")
+        np.save('/home2/supranta/PosteriorSampling/denoising_diffusion_pytorch/denoising_diffusion_pytorch/alpha_bar.npy',alphas_cumprod.detach().numpy())
         alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
 
         timesteps, = betas.shape
@@ -531,8 +551,13 @@ class GaussianDiffusion(Module):
         self.sampling_timesteps = default(sampling_timesteps, timesteps) # default num sampling timesteps to number of timesteps at training
 
         assert self.sampling_timesteps <= timesteps
-        self.is_ddim_sampling = self.sampling_timesteps < timesteps
+        self.is_ddim_sampling = True
+        #self.is_ddim_sampling = self.sampling_timesteps <= timesteps
         self.ddim_sampling_eta = ddim_sampling_eta
+
+        self.delta_t = 500    # 1200
+        #self.delta_t = 2000
+        self.sigma_t = 20 
 
         # helper function to register buffer from float64 to float32
 
@@ -590,6 +615,8 @@ class GaussianDiffusion(Module):
 
         self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
         self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
+
+        self.rt_daps = torch.tensor(np.load('./samples/daps/variance_calculation/rt.npy')[np.newaxis,:,:,np.newaxis,np.newaxis])
 
     @property
     def device(self):
@@ -667,7 +694,7 @@ class GaussianDiffusion(Module):
     def p_sample(self, x, t: int, x_self_cond = None):
         b, *_, device = *x.shape, self.device
         batched_times = torch.full((b,), t, device = device, dtype = torch.long)
-        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, x_self_cond = x_self_cond, clip_denoised = True)
+        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, x_self_cond = x_self_cond, clip_denoised = False)
         noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
         return pred_img, x_start
@@ -690,19 +717,21 @@ class GaussianDiffusion(Module):
 
         ret = self.unnormalize(ret)
         return ret
-
+    
+    
     @torch.inference_mode()
     def ddim_sample(self, shape, return_all_timesteps = False):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
-
+        
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
         img = torch.randn(shape, device = device)
         imgs = [img]
-
+        print(eta)
         x_start = None
+        t_list = []
 
         for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
             time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
@@ -725,19 +754,233 @@ class GaussianDiffusion(Module):
             img = x_start * alpha_next.sqrt() + \
                   c * pred_noise + \
                   sigma * noise
-
-            imgs.append(img)
+            if time in [980, 900, 800, 740, 700, 600, 500, 400]:
+                t_list.append(time)
+                imgs.append(img)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
-
         ret = self.unnormalize(ret)
         return ret
 
     @torch.inference_mode()
     def sample(self, batch_size = 16, return_all_timesteps = False):
         (h, w), channels = self.image_size, self.channels
+        print(self.is_ddim_sampling)
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
+        print('IS DDIM Sampling', self.is_ddim_sampling)
         return sample_fn((batch_size, channels, h, w), return_all_timesteps = return_all_timesteps)
+
+    def unnorm_kappa(self, field):
+        if(self.exp_transform):
+            y = (field * (self.y_max - self.y_min)) + self.y_min
+            kappa = torch.exp(y) + self.shift
+        else:          
+            kappa = (field * (self.kappa_max - self.kappa_min)) + self.kappa_min
+        return kappa
+
+    def torch_kappa_to_shear_old(self, kappa, N_grid = 128, theta_max = 12., J = 1j, EPS = 1e-20): 
+        torch_map_tool  = TorchMapTools(N_grid, theta_max)
+        kappa_fourier = torch_map_tool.map2fourier(kappa)
+        y_1, y_2   = torch_map_tool.do_fwd_KS(kappa_fourier)
+        shear_map = torch.stack((y_1, y_2))
+        return shear_map
+    
+    def torch_kappa_to_shear(self, kappa, N_grid = 128, theta_max = 12., J = 1j, EPS = 1e-20): 
+        torch_map_tool  = TorchMapTools(N_grid, theta_max)
+        y_1, y_2   = torch_map_tool.do_fwd_KS1(kappa)
+        shear_map = torch.stack((y_1, y_2))
+        return shear_map
+
+    def _internal_normalize(self, x):
+        return 0.5 * (x + 1.)
+
+    def compute_log_lkl(self, shears, noisy_image, sigma_noise):
+        loglkl = 0.
+        for i in range(self.channels):
+            loglkl += self.compute_complex_log_likelihood(shears[i], noisy_image[i], sigma_noise)
+        return loglkl
+
+    def compute_grad_log_lkl(self, x_t, x_start, noisy_image, sigma_noise_var, scaling_factor=1.):
+        x_start = self._internal_normalize(x_start)
+        kappa_map = self.unnorm_kappa(x_start)
+        shears = []
+        len, *_ = x_start.shape
+        loglkl = 0.
+        for i in range(self.channels):
+            shears_i = (self.torch_kappa_to_shear(kappa_map[:,i].squeeze(0)))
+            shears.append(shears_i)
+            loglkl += self.compute_complex_log_likelihood(shears[i], scaling_factor * noisy_image[i], sigma_noise_var)
+        loglkl.backward(retain_graph = True)
+        grad_log_lkl = x_t.grad
+        return grad_log_lkl
+
+
+    def compute_complex_log_likelihood(self, noisy_pred, noisy_shear_map, sigma_noise_var):
+        # Extract real and imaginary parts
+        y_1 = noisy_pred[0]
+        y_2 = noisy_pred[1]
+
+        y_1_sim = noisy_shear_map[0]
+        y_2_sim = noisy_shear_map[1]
+
+        # Compute MSE for real and imaginary parts separately
+        real_mse = -0.5 * (y_1 - y_1_sim)**2 / (sigma_noise_var)
+        imag_mse = -0.5 * (y_2 - y_2_sim)**2 / (sigma_noise_var)
+        # Sum the MSEs for real and imaginary parts to get a real-valued loss
+        mse = real_mse + imag_mse
+        return (-mse.sum())
+        
+
+    def ddim_sample_posterior(self, shape, noisy_image, sigma_noise, return_all_timesteps = False):
+        print("DDIM Sample Posterior called")
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+
+        x_t = torch.randn(shape, device = device)
+        imgs = [x_t]
+        t_list = []
+        x_start = torch.zeros(shape, device = device)
+        
+        ind = 0
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
+            x_t.requires_grad = True
+            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
+            self_cond = x_start if self.self_condition else None
+            pred_noise, x_start, *_ = self.model_predictions(x_t, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+            if time_next < 0:
+                img = x_start
+                imgs.append(img)
+                continue
+            #print("x_start: "+str(x_start))
+            alpha = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+
+            alpha_t = alpha/alpha_next
+            noise = torch.randn_like(x_t)
+           
+            lkl_scale = self.dps_lkl_scale(time, self.delta_t, self.sigma_t)
+            grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_noise**2)
+            if(time > 0):
+                with torch.no_grad():
+                    x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
+                    lkl_shift = lkl_scale * (1 - alpha_t) * (grad_log_lkl).detach()
+                    x_t -= lkl_shift
+                    #if time in [980, 900, 800, 740, 700, 600, 500, 400]:
+                    t_list.append(time)
+                    imgs.append(x_t)
+
+            else: 
+                with torch.no_grad():
+                    x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
+            ind += 1
+
+        ret = x_t if not return_all_timesteps else torch.stack(imgs, dim = 1)
+        self.t_list = t_list
+        ret = self.unnormalize(ret)
+        return ret
+
+    def set_dps_lkl_scale(self, delta_t, sigma_t):
+        self.delta_t = delta_t
+        self.sigma_t = sigma_t
+
+    def dps_lkl_scale(self, time, delta_t=900, sigma_t=200):
+        return 1. / (1. + np.exp(- (-time + delta_t) / sigma_t))
+
+            
+    def ddim_sample_sitcom(self, shape, noisy_image, sigma_noise, return_all_timesteps = False, K = 20, mean = 0, lr = 0.0001, lamb = 0, delta = 1.):
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+        x_t = torch.randn(shape, device = device)
+        imgs = [x_t]
+        x_start = torch.zeros(shape, device = device)
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
+            x_t.requires_grad = True
+            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
+            self_cond = x_start if self.self_condition else None
+            v_t = x_t.clone().detach().requires_grad_(True)  # Ensure v_t is detached and requires gradients
+            optimizer = torch.optim.Adam([v_t], lr=lr)
+            for k in range(K):
+                #print("k", k)
+                if not v_t.requires_grad:
+                    v_t.requires_grad_(True)
+                # Get predictions from the model
+                pred_noise, v_start, *_ = self.model_predictions(
+                    v_t, time_cond, self_cond, clip_x_start=True, rederive_pred_noise=True
+                )
+                # Compute ||A(v_start) - y||^{2}_{2}
+                kappa_map = self.unnormalize(v_start)
+                kappa_map = self.unnorm_kappa(kappa_map)
+                n_tomo_bins = kappa_map.shape[1]
+                shears = []
+                for i in range(self.channels):
+                    shears_i = (self.torch_kappa_to_shear(kappa_map[:,i].squeeze(0)))               
+                    shears.append(shears_i) 
+                # Define the two terms of the loss
+                loglkl = self.compute_log_lkl(shears, noisy_image, sigma_noise)
+                term1  = loglkl
+                print("Term 1", term1)
+                term2 = self.n_pix * torch.norm(v_t - x_t) ** 2
+                print("Term 2", term2)
+                # Compute the total loss
+                sum_loss = term1 + lamb * term2
+                # Backpropagate the loss
+                optimizer.zero_grad()
+                sum_loss.backward()
+                if term1 < delta * self.n_pix:
+                    break
+                optimizer.step()
+
+            x_t = v_t  # Assign final v_t to x_t after loop completion
+            pred_noise, x_start, *_ = self.model_predictions(x_t, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+            x_start = x_start #+ mean - torch.mean(x_start.detach().cpu())
+            if time_next < 0:
+                img = x_start
+                imgs.append(img)
+                continue
+            alpha = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+            alpha_t = alpha/alpha_next
+            noise = torch.randn_like(x_t)
+            if(time > 0):
+                with torch.no_grad():
+                    x_t = (x_start * alpha_next.sqrt() + c * pred_noise)
+        ret = x_t if not return_all_timesteps else torch.stack(imgs, dim = 1)
+        ret = self.unnormalize(ret)
+        return ret
+    
+    def sample_sitcom(self, batch_size = 1, return_all_timesteps = False, K = 20, mean = 0, lamb = 0., delta = 1.):
+        print("Sample sitcom called")
+        (h, w), channels = self.image_size, self.channels
+        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_sitcom
+        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps, K = K, mean = mean, lamb=lamb, delta = delta)
+
+    def sample_posterior(self, batch_size = 16, return_all_timesteps = False):
+        print("Sample Posterior called")
+        (h, w), channels = self.image_size, self.channels
+        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_posterior
+        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps)
+
+    def sample_dmps_posterior(self, batch_size = 16, return_all_timesteps = False):
+        print("Sample DMPS called")
+        (h, w), channels = self.image_size, self.channels
+        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_dmps
+        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps)
+
+    def sample_daps(self, batch_size = 16, return_all_timesteps = False):
+        (h, w), channels = self.image_size, self.channels
+        print(self.is_ddim_sampling)
+        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_daps
+        print('IS DDIM Sampling', self.is_ddim_sampling)
+        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps)
 
     @torch.inference_mode()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
@@ -825,7 +1068,34 @@ class GaussianDiffusion(Module):
 
 # dataset classes
 
-class Dataset(Dataset):
+class MassiveNusDataset(Dataset):
+    def __init__(self, folder, exp_transform=False, N_train=5000):
+        super().__init__()
+        self.N_train = N_train
+        self.folder = folder
+        train_data = np.array([self._get_map(i) for i in range(self.N_train)])
+        self.N_tomo_bins = train_data.shape[1]
+        self.kappa_min = np.array([train_data[:,i].min() for i in range(self.N_tomo_bins)])[np.newaxis,:,np.newaxis,np.newaxis]
+        self.kappa_max = np.array([train_data[:,i].max() for i in range(self.N_tomo_bins)])[np.newaxis,:,np.newaxis,np.newaxis]
+        if(exp_transform):
+            shift = 1.1 * self.kappa_min
+            y = np.log(train_data - shift)
+            self.y_min = np.log(self.kappa_min - shift)
+            self.y_max = np.log(self.kappa_max - shift)
+            self.train_data = (y - self.y_min) / (self.y_max - self.y_min)
+        else:
+            self.train_data = (train_data - self.kappa_min) / (self.kappa_max - self.kappa_min)
+    
+    def __len__(self):
+        return self.N_train
+
+    def __getitem__(self, index):
+        return self.train_data[index] 
+
+    def _get_map(self, i):
+        return np.load(self.folder + '/%d.npy'%(i+1))
+
+class CustomDataset(Dataset):
     def __init__(
         self,
         folder,
@@ -879,6 +1149,7 @@ class Trainer:
         amp = False,
         mixed_precision_type = 'fp16',
         split_batches = True,
+        exp_transform = False, 
         convert_image_to = None,
         calculate_fid = True,
         inception_block_idx = 2048,
@@ -923,11 +1194,12 @@ class Trainer:
 
         # dataset and dataloader
 
-        self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
+        #self.ds = CustomDataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
+        self.ds = MassiveNusDataset(folder, exp_transform=exp_transform)
 
         assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'
 
-        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = 4)
 
         dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
@@ -958,7 +1230,7 @@ class Trainer:
         self.calculate_fid = calculate_fid and self.accelerator.is_main_process
 
         if self.calculate_fid:
-            from denoising_diffusion_pytorch.fid_evaluation import FIDEvaluation
+            from fid_evaluation import FIDEvaluation
 
             if not is_ddim_sampling:
                 self.accelerator.print(
@@ -1060,7 +1332,7 @@ class Trainer:
 
                     if self.step != 0 and divisible_by(self.step, self.save_and_sample_every):
                         self.ema.ema_model.eval()
-
+                        print('Beginning Save')
                         with torch.inference_mode():
                             milestone = self.step // self.save_and_sample_every
                             batches = num_to_groups(self.num_samples, self.batch_size)
@@ -1069,13 +1341,15 @@ class Trainer:
                         all_images = torch.cat(all_images_list, dim = 0)
 
                         utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))
-
+                        print('Image Saved')
                         # whether to calculate fid
 
                         if self.calculate_fid:
+                            print('Get outta here with this')
                             fid_score = self.fid_scorer.fid_score()
                             accelerator.print(f'fid_score: {fid_score}')
-
+                        print('Almost there')
+                        
                         if self.save_best_and_latest_only:
                             if self.best_fid > fid_score:
                                 self.best_fid = fid_score
@@ -1083,7 +1357,7 @@ class Trainer:
                             self.save("latest")
                         else:
                             self.save(milestone)
-
+                        print('Milestone saved?')
                 pbar.update(1)
 
         accelerator.print('training complete')
