@@ -995,7 +995,8 @@ class MassiveNusDataset(Dataset):
             self.train_data = (y - self.y_min) / (self.y_max - self.y_min)
         else:
             self.train_data = (train_data - self.kappa_min) / (self.kappa_max - self.kappa_min)
-    
+        del train_data
+ 
     def __len__(self):
         return self.N_train
 
@@ -1104,7 +1105,6 @@ class Trainer:
 
         # dataset and dataloader
 
-        #self.ds = CustomDataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
         self.ds = MassiveNusDataset(folder, exp_transform=exp_transform)
 
         assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'

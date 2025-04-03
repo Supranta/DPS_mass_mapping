@@ -6,11 +6,11 @@ from tqdm import trange
 
 savedir = sys.argv[1]
 N_grid  = 128
-#N_grid  = int(sys.argv[2])
 N       = int(sys.argv[2])
+prior   = int(sys.argv[3])
 try:
 	print("Computing cross-correlations....")
-	compute_crosscorr = bool(int(sys.argv[3]))
+	compute_crosscorr = bool(int(sys.argv[4]))
 except:
 	compute_crosscorr = False
 
@@ -20,20 +20,10 @@ N_ell_bins  = 21
 ps_calculator = PowerSpectrumCalculator(N_grid, theta_max)
 ps_calculator.set_ell_bins(N_ell_bins)
 
-
-if(N_grid==256):
-	KAPPA_MIN = -0.08201675
-	KAPPA_MAX = 0.7101586
-	N_KAPPA = 101
-if(N_grid==128):
-	KAPPA_MIN = np.array([-0.03479804, -0.05888689, -0.08089042])
-	KAPPA_MAX = np.array([0.4712809, 0.58141315, 0.6327746])
-	#KAPPA_MIN = -0.056813
-	#KAPPA_MAX = 0.512567
-	#N_KAPPA = 151
-	#N_KAPPA = 51
-	N_KAPPA = 101
-
+N_grid==128
+KAPPA_MIN = np.array([-0.03479804, -0.05888689, -0.08089042])
+KAPPA_MAX = np.array([0.4712809, 0.58141315, 0.6327746])
+N_KAPPA = 101
 
 ps_calculator.set_kappa_bins(KAPPA_MIN, KAPPA_MAX, N_KAPPA)
 
@@ -92,7 +82,11 @@ if(compute_crosscorr):
 		scattering_transform_f['S2'] = S2
 
 for i in trange(N):
-	with h5.File(savedir + '/sample_%d.h5'%(i), 'r') as f:
+	if(prior):
+		filename = savedir + '/prior_sample_%d.h5'%(i)
+	else:
+		filename = savedir + '/posterior_sample_%d.h5'%(i)
+	with h5.File(filename, 'r') as f:
 		kappa = f['kappa'][:]
 
 	####### ============ Power spectrum ================
@@ -108,7 +102,7 @@ for i in trange(N):
 	####### ==================================================
 	if(compute_crosscorr):
 		rho_c = ps_calculator.compute_crosscorr(kappa, kappa_true)
-	with h5.File(savedir + '/sample_%d.h5'%(i), 'r+') as f:
+	with h5.File(filename, 'r+') as f:
 		for x in ['Cl', 'ng_stats', 'scattering_transform', 'crosscorr']:
 			if x in f:
 				del f[x]

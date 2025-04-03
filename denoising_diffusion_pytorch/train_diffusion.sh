@@ -1,13 +1,13 @@
 #!/bin/bash
 #
 # JOB SPECIFICATIONS:
-#SBATCH --job-name=exp_transform_diffusion
+#SBATCH --job-name=train_diffusion
 #SBATCH --partition=low_gpu_titan
 #SBATCH --qos=low
 #SBATCH --time=95:59:59
-#SBATCH --output=Diffusion_exp_transform.out
+#SBATCH --output=Diffusion_train.out
 #SBATCH --ntasks=1
-#SBATCH --mem=128GB
+#SBATCH --mem=8GB
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=supranta@sas.upenn.edu
 
