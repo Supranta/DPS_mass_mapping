@@ -38,16 +38,6 @@ train:
         data_folder: /home2/supranta/PosteriorSampling/data/Columbia_lensing/MassiveNuS/kappa_128_3bins/
         # Where to save the diffusion models
         results_folder: ./results
-
-data:
-        datafile: ./data/columbia_lensing/data.h5    # Data containing noisy shear data 
-        neff: 7.5                                    # Effective number density in arcmin^{-2}
-        sigma_e: 0.26                                # Shape noise
-
-diffusion:
-        trained_model_name: 32                       # The trained model to use for diffusion sampling
-        savedir: diffusion_samples                   # where to save the diffusion outputs
-        prior_batch_size: 16                         # Batch size while sampling the prior with the diffusion model
 ```
 ### Create noisy data
 - If the training is successfull, we first create a noisy mock data from the simulations using the script [`create_noisy_data.py`](https://github.com/Supranta/DPS_mass_mapping/blob/main/denoising_diffusion_pytorch/create_noisy_data.py)
@@ -60,11 +50,6 @@ data:
         datafile: ./data/columbia_lensing/data.h5    # Data containing noisy shear data 
         neff: 7.5                                    # Effective number density in arcmin^{-2}
         sigma_e: 0.26                                # Shape noise
-
-diffusion:
-        trained_model_name: 32                       # The trained model to use for diffusion sampling
-        savedir: diffusion_samples                   # where to save the diffusion outputs
-        prior_batch_size: 16                         # Batch size while sampling the prior with the diffusion model
 ```
 ### Sampling diffusion maps
 - We can then sample maps from the diffusion model using the [`sample.py`](https://github.com/Supranta/DPS_mass_mapping/blob/main/denoising_diffusion_pytorch/sample.py) script
