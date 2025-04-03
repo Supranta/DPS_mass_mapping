@@ -1,0 +1,21 @@
+map:
+        n_tomo: 3                   # Number of tomographic bins
+        n_grid: 128                 # Number of pixel grids in each map
+        theta_max: 3.5              # Size of the maps in degrees
+train:
+        # Training data location
+        data_folder: /home2/supranta/PosteriorSampling/data/Columbia_lensing/MassiveNuS/kappa_128_3bins/ 
+        # Where to save the diffusion models
+        results_folder: ./results
+
+data:
+        datafile: ./data/columbia_lensing/data.h5    # Data containing noisy shear data 
+        neff: 7.5                                    # Effective number density in arcmin^{-2}
+        sigma_e: 0.26                                # Shape noise
+
+diffusion:
+        trained_model_name: 32                       # The trained model to use for diffusion sampling
+        savedir: diffusion_samples                   # where to save the diffusion outputs
+        n_prior_iterations: 1                        # Number of sampling iterations for the prior sampling
+        prior_batch_size: 16                         # Batch size while sampling the prior with the diffusion model
+        n_dps_samples: 1                             # Number of DPS samples to generate

@@ -2,37 +2,38 @@ import torch
 import numpy as np
 import sys
 from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+import yaml
 
-N_channels = 3         # Number of tomographic bins
-data_folder = '/home2/supranta/PosteriorSampling/data/Columbia_lensing/MassiveNuS/kappa_128_3bins/'
+configfile = sys.argv[1]
+
+with open(configfile, 'r') as f:
+	config = yaml.safe_load(f)
+
+data_folder    = config['train']['data_folder']
+results_folder = config['train']['results_folder']
+
+n_tomo    = config['map']['n_tomo']
+n_grid    = config['map']['n_grid']
+
 KAPPA_MIN = np.array([-0.03479804,-0.05888689,-0.08089042])[:,np.newaxis,np.newaxis]
 KAPPA_MAX = np.array([0.4712809,  0.58141315, 0.6327746])[:,np.newaxis,np.newaxis]
 
-results_folder = './results'
-beta_schedule = 'sigmoid'
-schedule_fn_kwargs = {'start': -5}
-exp_transform = True
-dim_mults = (1, 2, 4, 8)
 
 #Adjust model architecture 
 model = Unet(
     dim = 64,
-    dim_mults = dim_mults,
     flash_attn = False, 
-    channels = N_channels
+    channels = n_tomo
 ).cuda()
 
 
 diffusion = GaussianDiffusion(
     model,
-    image_size = 128,
+    image_size = n_grid,
     timesteps = 1000,    # number of steps
     sampling_timesteps = 999,
-    beta_schedule = beta_schedule,
-    schedule_fn_kwargs = schedule_fn_kwargs,
     kappa_min = KAPPA_MIN,
     kappa_max = KAPPA_MAX,
-    exp_transform = exp_transform
 ).cuda()
 
 #Adjust training specifications
@@ -47,7 +48,7 @@ trainer = Trainer(
     ema_decay = 0.995,                # exponential moving average decay
     amp = True,                       # turn on mixed precision
     calculate_fid = False,            # whether to calculate fid during training
-    exp_transform = exp_transform,
+    #exp_transform = exp_transform,
     results_folder = results_folder
 )
 

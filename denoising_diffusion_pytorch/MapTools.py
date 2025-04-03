@@ -19,9 +19,6 @@ import numpy as np
 import h5py as h5
 
 
-# In[ ]:
-
-
 class MapTools:
     def __init__(self, N_grid, theta_max):
         self.set_map_properties(N_grid, theta_max)

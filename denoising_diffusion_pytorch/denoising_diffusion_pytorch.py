@@ -462,7 +462,7 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
-def sigmoid_beta_schedule(timesteps, start = -3, end = 3, tau = 1, clamp_min = 1e-5):
+def sigmoid_beta_schedule(timesteps, start = -5, end = 3, tau = 1, clamp_min = 1e-5):
     """
     sigmoid schedule
     proposed in https://arxiv.org/abs/2212.11972 - Figure 8
@@ -494,7 +494,7 @@ class GaussianDiffusion(Module):
         noisy_image = None,
         kappa_min = None,
         kappa_max = None, 
-        exp_transform = False, 
+        exp_transform = True, 
         sigma_noise = None, 
         offset_noise_strength = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
         min_snr_loss_weight = False, # https://arxiv.org/abs/2303.09556
@@ -979,7 +979,7 @@ class GaussianDiffusion(Module):
 # dataset classes
 
 class MassiveNusDataset(Dataset):
-    def __init__(self, folder, exp_transform=False, N_train=2000):
+    def __init__(self, folder, exp_transform=False, N_train=8000):
         super().__init__()
         self.N_train = N_train
         self.folder = folder
