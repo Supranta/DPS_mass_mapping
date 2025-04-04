@@ -68,5 +68,5 @@ diffusion:
 ### Compute the summary statistics of the sampled maps
 - After we have the sample the diffusion maps, we would like to validate the maps by computing various different summary statistics. This can be done by running 
 ```python
-	python3 compute_summary_stats_tomo.py SAMPLE_DIRECTORY N_SAMPLES 1
+	python3 compute_summary_stats.py $CONFIGFILE
 ``` 

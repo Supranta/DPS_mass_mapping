@@ -21,7 +21,8 @@ source ~/.bash_profile
 conda activate diffusion
 cd /home2/supranta/PosteriorSampling/denoising_diffusion_pytorch/denoising_diffusion_pytorch 
 
-python Train_model.py
+CONFIGFILE=./config/columbia_lensing.yaml
+python3 train.py $CONFIGFILE
 
 e=$(date)
 echo "ending"
