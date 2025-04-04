@@ -15,6 +15,11 @@ results_folder = config['train']['results_folder']
 n_tomo    = config['map']['n_tomo']
 n_grid    = config['map']['n_grid']
 
+try:
+	modelname = str(config['diffusion']['trained_model_name'])
+except:
+	modelname = None
+
 KAPPA_MIN = np.array([-0.03479804,-0.05888689,-0.08089042])[:,np.newaxis,np.newaxis]
 KAPPA_MAX = np.array([0.4712809,  0.58141315, 0.6327746])[:,np.newaxis,np.newaxis]
 
@@ -48,9 +53,11 @@ trainer = Trainer(
     ema_decay = 0.995,                # exponential moving average decay
     amp = True,                       # turn on mixed precision
     calculate_fid = False,            # whether to calculate fid during training
-    #exp_transform = exp_transform,
     results_folder = results_folder
 )
+
+if modelname is not None:
+	trainer.load(modelname)
 
 trainer.train()
 

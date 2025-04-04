@@ -63,7 +63,6 @@ diffusion = GaussianDiffusion(
 trainer = Trainer(
     diffusion,
     data_folder,
- #   gradient_accumulate_every = 2,    # gradient accumulation steps
     calculate_fid = False,            # whether to calculate fid during training
     results_folder = results_folder
 )
