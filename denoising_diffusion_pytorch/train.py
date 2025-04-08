@@ -3,6 +3,7 @@ import numpy as np
 import sys
 from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
 import yaml
+from utils import *
 
 configfile = sys.argv[1]
 
@@ -11,6 +12,7 @@ with open(configfile, 'r') as f:
 
 data_folder    = config['train']['data_folder']
 results_folder = config['train']['results_folder']
+ntrain         = config['train']['ntrain']
 
 n_tomo    = config['map']['n_tomo']
 n_grid    = config['map']['n_grid']
@@ -20,8 +22,8 @@ try:
 except:
 	modelname = None
 
-KAPPA_MIN = np.array([-0.03479804,-0.05888689,-0.08089042])[:,np.newaxis,np.newaxis]
-KAPPA_MAX = np.array([0.4712809,  0.58141315, 0.6327746])[:,np.newaxis,np.newaxis]
+KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
+KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
 
 
 #Adjust model architecture 
@@ -48,7 +50,7 @@ trainer = Trainer(
     train_batch_size = 16,
     train_lr = 8e-7,
     save_and_sample_every = 10000,
-    train_num_steps = 500000,         # total training steps
+    train_num_steps = ntrain,         # total training steps
     gradient_accumulate_every = 2,    # gradient accumulation steps
     ema_decay = 0.995,                # exponential moving average decay
     amp = True,                       # turn on mixed precision

@@ -7,6 +7,10 @@ train:
         data_folder: /home2/supranta/PosteriorSampling/data/Columbia_lensing/MassiveNuS/kappa_128_3bins/ 
         # Where to save the diffusion models
         results_folder: ./results
+        ntrain: 600000
+        transform:
+                kappa_min: -0.03479804,-0.05888689,-0.08089042
+                kappa_max: 0.4712809,0.58141315,0.6327746
 
 data:
         datafile: ./data/columbia_lensing/data.h5    # Data containing noisy shear data 
@@ -14,7 +18,7 @@ data:
         sigma_e: 0.26                                # Shape noise
 
 diffusion:
-        trained_model_name: 32                       # The trained model to use for diffusion sampling
+        trained_model_name: 50                       # The trained model to use for diffusion sampling
         savedir: diffusion_samples                   # where to save the diffusion outputs
         n_prior_iterations: 1                        # Number of sampling iterations for the prior sampling
         prior_batch_size: 16                         # Batch size while sampling the prior with the diffusion model

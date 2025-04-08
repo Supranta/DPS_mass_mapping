@@ -38,6 +38,12 @@ train:
         data_folder: /home2/supranta/PosteriorSampling/data/Columbia_lensing/MassiveNuS/kappa_128_3bins/
         # Where to save the diffusion models
         results_folder: ./results
+	# Number of training steps for the model 
+	ntrain: 600000                           
+        transform:
+                 kappa_min: -0.03479804,-0.05888689,-0.08089042
+                 kappa_max: 0.4712809,0.58141315,0.6327746
+
 ```
 ### Create noisy data
 - If the training is successfull, we first create a noisy mock data from the simulations using the script [`create_noisy_data.py`](https://github.com/Supranta/DPS_mass_mapping/blob/main/denoising_diffusion_pytorch/create_noisy_data.py)

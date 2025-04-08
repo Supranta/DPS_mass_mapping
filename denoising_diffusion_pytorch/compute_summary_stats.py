@@ -2,6 +2,7 @@ import numpy as np
 import h5py as h5
 import sys
 from FieldAnalysis import PowerSpectrumCalculator 
+from utils import *
 from tqdm import trange
 
 import yaml
@@ -22,6 +23,9 @@ n_iters    = config['diffusion']['n_prior_iterations']
 n_dps      = config['diffusion']['n_dps_samples']
 batch_size = config['diffusion']['prior_batch_size']
 
+KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])
+KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])
+
 try:
 	print("Computing cross-correlations....")
 	compute_crosscorr = bool(int(sys.argv[2]))
@@ -32,9 +36,6 @@ N_ell_bins  = 21
 
 ps_calculator = PowerSpectrumCalculator(n_grid, theta_max)
 ps_calculator.set_ell_bins(N_ell_bins)
-
-KAPPA_MIN = np.array([-0.03479804, -0.05888689, -0.08089042])
-KAPPA_MAX = np.array([0.4712809, 0.58141315, 0.6327746])
 
 N_KAPPA = 101
 

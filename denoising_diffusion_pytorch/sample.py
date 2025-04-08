@@ -5,6 +5,7 @@ import numpy as np
 import h5py as h5
 from tqdm import trange
 import sys
+from utils import *
 import yaml
 
 configfile = sys.argv[1]
@@ -26,8 +27,8 @@ batch_size = config['diffusion']['prior_batch_size']                   # Number 
 n_iters    = config['diffusion']['n_prior_iterations']
 n_dps      = config['diffusion']['n_dps_samples']
 
-KAPPA_MIN = np.array([-0.03479804,-0.05888689,-0.08089042])[:,np.newaxis,np.newaxis]
-KAPPA_MAX = np.array([0.4712809,  0.58141315, 0.6327746])[:,np.newaxis,np.newaxis]
+KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
+KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
 
 def unnorm_kappa(field, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX):
     shift = 1.1 * kappa_min
