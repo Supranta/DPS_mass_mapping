@@ -35,6 +35,7 @@ ps_calculator.set_ell_bins(N_ell_bins)
 
 KAPPA_MIN = np.array([-0.03479804, -0.05888689, -0.08089042])
 KAPPA_MAX = np.array([0.4712809, 0.58141315, 0.6327746])
+
 N_KAPPA = 101
 
 ps_calculator.set_kappa_bins(KAPPA_MIN, KAPPA_MAX, N_KAPPA)
@@ -71,7 +72,7 @@ def get_all_summary_stats(kappa):
 	summary_stats = [binned_Cl, kappa_pdf, kappa_peak_counts, kappa_void_counts, S1, S2]
 	return ell_bin_centre, summary_stats
 
-def save_summary_stats(f, summary_stats):
+def save_summary_stats(f, ell_bin_centre, summary_stats):
 	binned_Cl, kappa_pdf, kappa_peak_counts, kappa_void_counts, S1, S2 = summary_stats	
 
 	for x in ['Cl', 'ng_stats', 'scattering_transform', 'crosscorr']:
@@ -91,34 +92,29 @@ def save_summary_stats(f, summary_stats):
 	scattering_transform_f = f.create_group('scattering_transform')
 	scattering_transform_f['S1'] = S1
 	scattering_transform_f['S2'] = S2
-	
-if(compute_crosscorr):
-	print("Computing crosscorr...")
-	with h5.File(savedir + '/data.h5', 'r') as f:
-		kappa_true = f['kappa'][:]
-	ell_bin_centre, summary_stats = get_all_summary_stats(kappa_true)	
-	with h5.File(savedir + '/data.h5', 'r+') as f:
-		save_summary_stats(f, summary_stats)	
 
-n_prior = n_iters * batch_size 
-for i in trange(n_prior):
-	filename = savedir + '/prior_sample_%d.h5'%(i)
+def process_file(filename, compute_crosscorr=False):
 	with h5.File(filename, 'r') as f:
 		kappa = f['kappa'][:]
-	ell_bin_centre, summary_stats = get_all_summary_stats(kappa)	
-	with h5.File(filename, 'r+') as f:
-		save_summary_stats(f, summary_stats)	
-
-for i in trange(n_dps):
-	filename = savedir + '/posterior_sample_%d.h5'%(i)
-	with h5.File(filename, 'r') as f:
-		kappa = f['kappa'][:]
-	ell_bin_centre, summary_stats = get_all_summary_stats(kappa)	
+	ell_bin_centre, summary_stats = get_all_summary_stats(kappa)
 	if(compute_crosscorr):
-		rho_c = ps_calculator.compute_crosscorr(kappa, kappa_true)
+		rho_c = ps_calculator.compute_crosscorr(kappa, kappa_true)	
 	with h5.File(filename, 'r+') as f:
-		save_summary_stats(f, summary_stats)	
+		save_summary_stats(f, ell_bin_centre, summary_stats)	
 		if(compute_crosscorr):
 			crosscorr_grp = f.create_group('crosscorr')
 			crosscorr_grp['ell_bin_centre'] = ell_bin_centre
 			crosscorr_grp['crosscorr']      = rho_c
+
+if(compute_crosscorr):
+	print("Computing crosscorr...")
+	process_file(datafile)
+
+n_prior = n_iters * batch_size 
+for i in trange(n_prior):
+	filename = savedir + '/prior_sample_%d.h5'%(i)
+	process_file(filename)
+
+for i in trange(n_dps):
+	filename = savedir + '/posterior_sample_%d.h5'%(i)
+	process_file(filename, compute_crosscorr)
