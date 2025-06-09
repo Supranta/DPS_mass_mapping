@@ -18,8 +18,8 @@ data:
         sigma_e: 0.26                                # Shape noise
 
 diffusion:
-        trained_model_name: 50                       # The trained model to use for diffusion sampling
+        trained_model_name: 32                       # The trained model to use for diffusion sampling
         savedir: diffusion_samples                   # where to save the diffusion outputs
         n_prior_iterations: 1                        # Number of sampling iterations for the prior sampling
-        prior_batch_size: 16                         # Batch size while sampling the prior with the diffusion model
+        prior_batch_size: 8                          # Batch size while sampling the prior with the diffusion model
         n_dps_samples: 1                             # Number of DPS samples to generate

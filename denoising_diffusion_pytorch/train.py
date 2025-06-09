@@ -48,6 +48,7 @@ trainer = Trainer(
     diffusion,
     data_folder, 
     train_batch_size = 16,
+    exp_transform = True,
     train_lr = 8e-7,
     save_and_sample_every = 10000,
     train_num_steps = ntrain,         # total training steps
