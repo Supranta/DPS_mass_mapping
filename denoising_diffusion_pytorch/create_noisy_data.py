@@ -7,6 +7,7 @@ import h5py as h5
 from tqdm import trange
 import sys
 import yaml
+from utils import *
 
 configfile = sys.argv[1]
 
@@ -66,8 +67,8 @@ def neff2noise(sigma_e, neff, pix_area):
     total_noise = sigma_e / math.sqrt(N)
     return total_noise
 
-KAPPA_MIN = np.array([-0.03479804,-0.05888689,-0.08089042])[:,np.newaxis,np.newaxis]
-KAPPA_MAX = np.array([0.4712809,  0.58141315, 0.6327746])[:,np.newaxis,np.newaxis]
+KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
+KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
 
 def unnorm_kappa(field, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX):
     shift = 1.1 * kappa_min

@@ -34,6 +34,13 @@ from attend import Attend
 
 from version import __version__
 
+def check_memory_status():
+    allocated = torch.cuda.memory_allocated() / 1e9
+    reserved = torch.cuda.memory_reserved() / 1e9
+    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+    print(f"Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB, Total: {total:.2f} GB")
+    print(f"Free: {total - reserved:.2f} GB")
+
 # constants
 
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
@@ -397,7 +404,6 @@ class Unet(Module):
         if self.self_condition:
             x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
             x = torch.cat((x_self_cond, x), dim = 1)
-
         x = self.init_conv(x)
         r = x.clone()
 
@@ -428,9 +434,7 @@ class Unet(Module):
             x = attn(x) + x
 
             x = upsample(x)
-
         x = torch.cat((x, r), dim = 1)
-
         x = self.final_res_block(x, t)
         return self.final_conv(x)
 
@@ -978,8 +982,8 @@ class GaussianDiffusion(Module):
 
 # dataset classes
 
-class MassiveNusDataset(Dataset):
-    def __init__(self, folder, exp_transform=False, N_train=8000):
+class WLDataset(Dataset):
+    def __init__(self, folder, exp_transform=True, N_train=2000):
         super().__init__()
         self.N_train = N_train
         self.folder = folder
@@ -1060,7 +1064,7 @@ class Trainer:
         amp = False,
         mixed_precision_type = 'fp16',
         split_batches = True,
-        exp_transform = False, 
+        exp_transform = True, 
         convert_image_to = None,
         calculate_fid = True,
         inception_block_idx = 2048,
@@ -1105,7 +1109,7 @@ class Trainer:
 
         # dataset and dataloader
 
-        self.ds = MassiveNusDataset(folder, exp_transform=exp_transform)
+        self.ds = WLDataset(folder, exp_transform=exp_transform)
 
         assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'
 
@@ -1209,6 +1213,7 @@ class Trainer:
         accelerator = self.accelerator
         device = accelerator.device
 
+        
         with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
 
             while self.step < self.train_num_steps:
@@ -1217,12 +1222,14 @@ class Trainer:
                 total_loss = 0.
 
                 for _ in range(self.gradient_accumulate_every):
+                    torch.cuda.empty_cache()
                     data = next(self.dl).to(device)
 
                     with self.accelerator.autocast():
                         loss = self.model(data)
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()
+
 
                     self.accelerator.backward(loss)
 

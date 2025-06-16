@@ -47,12 +47,11 @@ diffusion = GaussianDiffusion(
 trainer = Trainer(
     diffusion,
     data_folder, 
-    train_batch_size = 16,
-    exp_transform = True,
+    train_batch_size = 4,
     train_lr = 8e-7,
-    save_and_sample_every = 10000,
+    save_and_sample_every = 5000,
     train_num_steps = ntrain,         # total training steps
-    gradient_accumulate_every = 2,    # gradient accumulation steps
+    gradient_accumulate_every = 4,    # gradient accumulation steps
     ema_decay = 0.995,                # exponential moving average decay
     amp = True,                       # turn on mixed precision
     calculate_fid = False,            # whether to calculate fid during training
