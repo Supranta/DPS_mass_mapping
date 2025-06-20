@@ -47,7 +47,7 @@ diffusion = GaussianDiffusion(
 trainer = Trainer(
     diffusion,
     data_folder, 
-    train_batch_size = 4,
+    train_batch_size = 8,
     train_lr = 8e-7,
     save_and_sample_every = 5000,
     train_num_steps = ntrain,         # total training steps

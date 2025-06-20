@@ -29,18 +29,34 @@ from ema_pytorch import EMA
 
 from accelerate import Accelerator
 from MapTools import TorchMapTools
+import time
+import psutil
+import os
 
 from attend import Attend
 
 from version import __version__
 
 def check_memory_status():
+    # GPU Memory
     allocated = torch.cuda.memory_allocated() / 1e9
     reserved = torch.cuda.memory_reserved() / 1e9
     total = torch.cuda.get_device_properties(0).total_memory / 1e9
-    print(f"Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB, Total: {total:.2f} GB")
-    print(f"Free: {total - reserved:.2f} GB")
+    print(f"GPU - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB, Total: {total:.2f} GB")
+    print(f"GPU - Free: {total - reserved:.2f} GB")
 
+    # CPU Memory (System-wide)
+    cpu_memory = psutil.virtual_memory()
+    cpu_used = cpu_memory.used / 1e9
+    cpu_total = cpu_memory.total / 1e9
+    cpu_available = cpu_memory.available / 1e9
+    print(f"CPU - Used: {cpu_used:.2f} GB, Available: {cpu_available:.2f} GB, Total: {cpu_total:.2f} GB")
+    print(f"CPU - Usage: {cpu_memory.percent:.1f}%")
+    
+    # Your process specifically
+    process = psutil.Process(os.getpid())
+    process_memory = process.memory_info().rss / 1e9  # Resident Set Size
+    print(f"Your process - Memory: {process_memory:.2f} GB")
 # constants
 
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
@@ -981,34 +997,31 @@ class GaussianDiffusion(Module):
         return self.p_losses(img, t, *args, **kwargs)
 
 # dataset classes
-
+#"""
 class WLDataset(Dataset):
-    def __init__(self, folder, exp_transform=True, N_train=2000):
+    def __init__(self, folder, KAPPA_MIN, KAPPA_MAX, exp_transform=True, N_train=20000):
         super().__init__()
         self.N_train = N_train
         self.folder = folder
-        train_data = np.array([self._get_map(i) for i in range(self.N_train)])
-        self.N_tomo_bins = train_data.shape[1]
-        self.kappa_min = np.array([train_data[:,i].min() for i in range(self.N_tomo_bins)])[np.newaxis,:,np.newaxis,np.newaxis]
-        self.kappa_max = np.array([train_data[:,i].max() for i in range(self.N_tomo_bins)])[np.newaxis,:,np.newaxis,np.newaxis]
-        if(exp_transform):
-            shift = 1.1 * self.kappa_min
-            y = np.log(train_data - shift)
-            self.y_min = np.log(self.kappa_min - shift)
-            self.y_max = np.log(self.kappa_max - shift)
-            self.train_data = (y - self.y_min) / (self.y_max - self.y_min)
-        else:
-            self.train_data = (train_data - self.kappa_min) / (self.kappa_max - self.kappa_min)
-        del train_data
- 
+        self.kappa_min = KAPPA_MIN
+        self.kappa_max = KAPPA_MAX
+        self.exp_transform = exp_transform
+        if(self.exp_transform):
+            self.shift = 1.1 * self.kappa_min
+            self.y_min = np.log(self.kappa_min - self.shift)
+            self.y_max = np.log(self.kappa_max - self.shift)
+
     def __len__(self):
         return self.N_train
 
     def __getitem__(self, index):
-        return self.train_data[index] 
-
-    def _get_map(self, i):
-        return np.load(self.folder + '/%d.npy'%(i+1))
+        kappa = np.load(self.folder + '/%d.npy'%(index+1))
+        if(self.exp_transform):
+            y = np.log(kappa - self.shift)
+            train_map = (y - self.y_min) / (self.y_max - self.y_min)
+        else:
+            train_map = (kappa - self.kappa_min) / (self.kappa_max - self.kappa_min)
+        return train_map.astype(np.float32)
 
 class CustomDataset(Dataset):
     def __init__(
@@ -1109,7 +1122,10 @@ class Trainer:
 
         # dataset and dataloader
 
-        self.ds = WLDataset(folder, exp_transform=exp_transform)
+        self.ds = WLDataset(folder, 
+                            diffusion_model.kappa_min.cpu().numpy(), 
+                            diffusion_model.kappa_max.cpu().numpy(), 
+                            exp_transform=exp_transform)
 
         assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'
 
@@ -1213,9 +1229,7 @@ class Trainer:
         accelerator = self.accelerator
         device = accelerator.device
 
-        
         with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
-
             while self.step < self.train_num_steps:
                 self.model.train()
 
@@ -1224,7 +1238,6 @@ class Trainer:
                 for _ in range(self.gradient_accumulate_every):
                     torch.cuda.empty_cache()
                     data = next(self.dl).to(device)
-
                     with self.accelerator.autocast():
                         loss = self.model(data)
                         loss = loss / self.gradient_accumulate_every
@@ -1232,7 +1245,6 @@ class Trainer:
 
 
                     self.accelerator.backward(loss)
-
                 pbar.set_description(f'loss: {total_loss:.4f}')
 
                 accelerator.wait_for_everyone()
