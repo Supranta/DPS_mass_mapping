@@ -29,13 +29,17 @@ n_dps      = config['diffusion']['n_dps_samples']
 
 KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
 KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
+exp_transform = config['train']['transform']['exp_transform']
 
-def unnorm_kappa(field, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX):
-    shift = 1.1 * kappa_min
-    y_min = np.log(kappa_min - shift)
-    y_max = np.log(kappa_max - shift)
-    y = (field * (y_max - y_min)) + y_min
-    kappa = np.exp(y) + shift
+def unnorm_kappa(field, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX, exp_transform = exp_transform):
+    if(exp_transform):
+        shift = 1.1 * kappa_min
+        y_min = np.log(kappa_min - shift)
+        y_max = np.log(kappa_max - shift)
+        y = (field * (y_max - y_min)) + y_min
+        kappa = np.exp(y) + shift
+    else:
+        kappa = (field * (kappa_max - kappa_min)) + kappa_min
     return kappa
 
 # Define the diffusion model architecture
@@ -58,6 +62,7 @@ diffusion = GaussianDiffusion(
     sigma_noise = sigma_noise, #Noise specification
     kappa_min = KAPPA_MIN,
     kappa_max = KAPPA_MAX,
+    exp_transform = exp_transform,
     ddim_sampling_eta = 1.
 ).cuda()
 
@@ -87,7 +92,7 @@ for n in trange(n_iters):
 			f['kappa'] = kappa_map 
 
 # Sample maps from the diffusion model posterior using DPS
-N_samples = 1 # Will create a total of 10 posterior maps 
+N_samples = 1 # Will create a total of n_dps posterior maps 
 for sample_id in trange(n_dps):
     sampled_images_posterior = diffusion.sample_posterior(batch_size = 1, return_all_timesteps=False)
     with h5.File(samples_root + '/posterior_sample_%d.h5'%(sample_id), 'w') as f:

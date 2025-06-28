@@ -69,17 +69,28 @@ def neff2noise(sigma_e, neff, pix_area):
 
 KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
 KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
+exp_transform = config['train']['transform']['exp_transform']
 
-def unnorm_kappa(field, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX):
-    shift = 1.1 * kappa_min
-    y_min = np.log(kappa_min - shift)
-    y_max = np.log(kappa_max - shift)
-    y = (field * (y_max - y_min)) + y_min
-    kappa = np.exp(y) + shift
+def unnorm_kappa(field, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX, exp_transform = exp_transform):
+    if(exp_transform):
+        shift = 1.1 * kappa_min
+        y_min = np.log(kappa_min - shift)
+        y_max = np.log(kappa_max - shift)
+        y = (field * (y_max - y_min)) + y_min
+        kappa = np.exp(y) + shift
+    else:
+        kappa = (field * (kappa_max - kappa_min)) + kappa_min
     return kappa
 
-def norm_kappa(kappa, kappa_min = -0.08201675, kappa_max = 0.7101586):
-    x = (kappa - kappa_min) / (kappa_max - kappa_min)
+def norm_kappa(kappa, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX, exp_transform = exp_transform):
+    if exp_transform:
+        shift = 1.1 * kappa_min
+        y_min = np.log(kappa_min - shift)
+        y_max = np.log(kappa_max - shift)
+        y = np.log(kappa - shift)
+        x = (y - y_min) / (y_max - y_min)
+    else:
+        x = (kappa - kappa_min) / (kappa_max - kappa_min)
     return x
 
 #Hyperparameters
@@ -93,7 +104,7 @@ filename  = data_folder + "/%d.npy"%(n_ind)
 kappa_map = np.load(filename)    
 kappa_map = torch.tensor(kappa_map)
 
-kappa_map = kappa_map.to('cuda:0')
+kappa_map = kappa_map.to('cuda')
 kappa_map.requires_grad = False
 
 # Create a noisy shear map and also the associated Kaiser-Squires inverted map
@@ -114,8 +125,8 @@ for i in range(n_tomo):
 # Save the data file
 with h5.File(datafile, 'w') as f:
     f['kappa']       = kappa_map.cpu().numpy()
-    f['noisy_shear'] = np.array([noisy_shear_map_tomo[i].cpu().numpy() for i in range(3)])
-    f['KS_map']      = np.array([KS_inv_map_tomo[i].cpu().numpy() for i in range(3)])
+    f['noisy_shear'] = np.array([noisy_shear_map_tomo[i].cpu().numpy() for i in range(n_tomo)])
+    f['KS_map']      = np.array([KS_inv_map_tomo[i].cpu().numpy() for i in range(n_tomo)])
     f['neff']        = neff       
     f['sigma_noise'] = sigma_noise
 

@@ -529,9 +529,9 @@ class GaussianDiffusion(Module):
         self.channels = self.model.channels
         self.self_condition = self.model.self_condition
         self.noisy_image = noisy_image
-        self.kappa_min = torch.tensor(kappa_min).to('cuda:0')
-        self.kappa_max = torch.tensor(kappa_max).to('cuda:0')
-        self.sigma_noise = sigma_noise
+        self.kappa_min     = torch.tensor(kappa_min).to('cuda')
+        self.kappa_max     = torch.tensor(kappa_max).to('cuda')
+        self.sigma_noise   = sigma_noise
         self.exp_transform = exp_transform
         if(self.exp_transform):
             self.shift = 1.1 * self.kappa_min
@@ -1077,7 +1077,6 @@ class Trainer:
         amp = False,
         mixed_precision_type = 'fp16',
         split_batches = True,
-        exp_transform = True, 
         convert_image_to = None,
         calculate_fid = True,
         inception_block_idx = 2048,
@@ -1099,9 +1098,7 @@ class Trainer:
         self.model = diffusion_model
         self.channels = diffusion_model.channels
         is_ddim_sampling = diffusion_model.is_ddim_sampling
-
-        # default convert_image_to depending on channels
-
+        
         if not exists(convert_image_to):
             convert_image_to = {1: 'L', 3: 'RGB', 4: 'RGBA'}.get(self.channels)
 
@@ -1125,11 +1122,11 @@ class Trainer:
         self.ds = WLDataset(folder, 
                             diffusion_model.kappa_min.cpu().numpy(), 
                             diffusion_model.kappa_max.cpu().numpy(), 
-                            exp_transform=exp_transform)
+                            exp_transform=diffusion_model.exp_transform)
 
         assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'
 
-        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = 4)
+        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = 1)
 
         dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
@@ -1229,6 +1226,7 @@ class Trainer:
         accelerator = self.accelerator
         device = accelerator.device
 
+        print("Entering training loop.... ")
         with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
             while self.step < self.train_num_steps:
                 self.model.train()
@@ -1246,7 +1244,6 @@ class Trainer:
 
                     self.accelerator.backward(loss)
                 pbar.set_description(f'loss: {total_loss:.4f}')
-
                 accelerator.wait_for_everyone()
                 accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 

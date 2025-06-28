@@ -24,7 +24,7 @@ except:
 
 KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
 KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
-
+exp_transform = config['train']['transform']['exp_transform']
 
 #Adjust model architecture 
 model = Unet(
@@ -41,13 +41,14 @@ diffusion = GaussianDiffusion(
     sampling_timesteps = 999,
     kappa_min = KAPPA_MIN,
     kappa_max = KAPPA_MAX,
+    exp_transform = exp_transform
 ).cuda()
 
 #Adjust training specifications
 trainer = Trainer(
     diffusion,
     data_folder, 
-    train_batch_size = 8,
+    train_batch_size = 24,
     train_lr = 8e-7,
     save_and_sample_every = 5000,
     train_num_steps = ntrain,         # total training steps
