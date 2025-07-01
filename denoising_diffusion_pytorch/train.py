@@ -44,18 +44,22 @@ diffusion = GaussianDiffusion(
     exp_transform = exp_transform
 ).cuda()
 
+n_gpus       = 3
+base_lr      = 8e-5
+n_accumulate = 1
+lr           = base_lr * n_gpus * n_accumulate
 #Adjust training specifications
 trainer = Trainer(
     diffusion,
     data_folder, 
     train_batch_size = 24,
-    train_lr = 8e-7,
-    save_and_sample_every = 5000,
-    train_num_steps = ntrain,         # total training steps
-    gradient_accumulate_every = 4,    # gradient accumulation steps
-    ema_decay = 0.995,                # exponential moving average decay
-    amp = True,                       # turn on mixed precision
-    calculate_fid = False,            # whether to calculate fid during training
+    train_lr = lr,
+    save_and_sample_every = 2000,
+    train_num_steps = ntrain,                 # total training steps
+    gradient_accumulate_every = n_accumulate, # gradient accumulation steps
+    ema_decay = 0.995,                        # exponential moving average decay
+    amp = True,                               # turn on mixed precision
+    calculate_fid = False,                    # whether to calculate fid during training
     results_folder = results_folder
 )
 

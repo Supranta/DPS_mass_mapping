@@ -7,9 +7,9 @@ train:
         data_folder: /home2/supranta/PosteriorSampling/data/Marco_Flagship/Flagship_covariance_small/all_patches/
         # Where to save the diffusion models
         results_folder: ./results_desy3
-        ntrain: 600000
+        ntrain: 50000
         transform:
-                exp_transform: true
+                exp_transform: false
                 kappa_min: -0.00842643,-0.01598292,-0.02735016,-0.03807191
                 kappa_max: 0.76519483,0.9558846,1.1022788,1.1788471
 data:
@@ -18,7 +18,8 @@ data:
         sigma_e: 0.26                                # Shape noise
 
 diffusion:
-        savedir: diffusion_samples                   # where to save the diffusion outputs
-        n_prior_iterations: 1                        # Number of sampling iterations for the prior sampling
-        prior_batch_size: 1                          # Batch size while sampling the prior with the diffusion model
-        n_dps_samples: 1                             # Number of DPS samples to generate
+        trained_model_name: 10
+        savedir: desy3_samples                   # where to save the diffusion outputs
+        n_prior_iterations: 4                        # Number of sampling iterations for the prior sampling
+        prior_batch_size: 8                          # Batch size while sampling the prior with the diffusion model
+        n_dps_samples: 0                             # Number of DPS samples to generate

@@ -997,9 +997,8 @@ class GaussianDiffusion(Module):
         return self.p_losses(img, t, *args, **kwargs)
 
 # dataset classes
-#"""
 class WLDataset(Dataset):
-    def __init__(self, folder, KAPPA_MIN, KAPPA_MAX, exp_transform=True, N_train=20000):
+    def __init__(self, folder, KAPPA_MIN, KAPPA_MAX, exp_transform=True, N_train=100000):
         super().__init__()
         self.N_train = N_train
         self.folder = folder
@@ -1022,38 +1021,6 @@ class WLDataset(Dataset):
         else:
             train_map = (kappa - self.kappa_min) / (self.kappa_max - self.kappa_min)
         return train_map.astype(np.float32)
-
-class CustomDataset(Dataset):
-    def __init__(
-        self,
-        folder,
-        image_size,
-        exts = ['jpg', 'jpeg', 'png', 'tiff'],
-        augment_horizontal_flip = False,
-        convert_image_to = None
-    ):
-        super().__init__()
-        self.folder = folder
-        self.image_size = image_size
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-
-        maybe_convert_fn = partial(convert_image_to_fn, convert_image_to) if exists(convert_image_to) else nn.Identity()
-
-        self.transform = T.Compose([
-            T.Lambda(maybe_convert_fn),
-            T.Resize(image_size),
-            T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
-            T.CenterCrop(image_size),
-            T.ToTensor()
-        ])
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, index):
-        path = self.paths[index]
-        img = Image.open(path)
-        return self.transform(img)
 
 # trainer class
 
@@ -1258,31 +1225,8 @@ class Trainer:
 
                     if self.step != 0 and divisible_by(self.step, self.save_and_sample_every):
                         self.ema.ema_model.eval()
-                        print('Beginning Save')
-                        with torch.inference_mode():
-                            milestone = self.step // self.save_and_sample_every
-                            batches = num_to_groups(self.num_samples, self.batch_size)
-                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
-
-                        all_images = torch.cat(all_images_list, dim = 0)
-
-                        utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))
-                        print('Image Saved')
-                        # whether to calculate fid
-
-                        if self.calculate_fid:
-                            print('Get outta here with this')
-                            fid_score = self.fid_scorer.fid_score()
-                            accelerator.print(f'fid_score: {fid_score}')
-                        print('Almost there')
-                        
-                        if self.save_best_and_latest_only:
-                            if self.best_fid > fid_score:
-                                self.best_fid = fid_score
-                                self.save("best")
-                            self.save("latest")
-                        else:
-                            self.save(milestone)
+                        milestone = self.step // self.save_and_sample_every
+                        self.save(milestone)
                         print('Milestone saved?')
                 pbar.update(1)
 
