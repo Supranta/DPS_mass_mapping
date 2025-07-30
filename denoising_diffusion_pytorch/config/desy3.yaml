@@ -18,8 +18,8 @@ data:
         sigma_e: 0.26                                # Shape noise
 
 diffusion:
-        trained_model_name: 10
-        savedir: desy3_samples                   # where to save the diffusion outputs
-        n_prior_iterations: 4                        # Number of sampling iterations for the prior sampling
-        prior_batch_size: 8                          # Batch size while sampling the prior with the diffusion model
-        n_dps_samples: 0                             # Number of DPS samples to generate
+        trained_model_name: 12
+        savedir: desy3_samples                 # where to save the diffusion outputs
+        batch_size: 4                          # Batch size while sampling with the diffusion model
+        n_prior_iterations: 1                  # Number of sampling iterations for the prior sampling
+        n_dps_iterations: 1                    # Number of DPS sampling iterations to generate

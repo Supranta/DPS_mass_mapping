@@ -16,6 +16,7 @@ ntrain         = config['train']['ntrain']
 
 n_tomo    = config['map']['n_tomo']
 n_grid    = config['map']['n_grid']
+theta_max = config['map']['theta_max']
 
 try:
 	modelname = str(config['diffusion']['trained_model_name'])
@@ -37,6 +38,7 @@ model = Unet(
 diffusion = GaussianDiffusion(
     model,
     image_size = n_grid,
+    theta_max = theta_max,
     timesteps = 1000,    # number of steps
     sampling_timesteps = 999,
     kappa_min = KAPPA_MIN,

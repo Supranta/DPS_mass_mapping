@@ -19,9 +19,9 @@ theta_max = config['map']['theta_max']
 datafile  = config['data']['datafile']
 
 savedir    = './samples/' + config['diffusion']['savedir']
-n_iters    = config['diffusion']['n_prior_iterations']
-n_dps      = config['diffusion']['n_dps_samples']
-batch_size = config['diffusion']['prior_batch_size']
+batch_size  = config['diffusion']['batch_size']                   # Number of samples for diffusion sampling
+n_iters     = config['diffusion']['n_prior_iterations']
+n_iters_dps = config['diffusion']['n_dps_iterations']
 
 KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])
 KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])
@@ -116,6 +116,7 @@ for i in trange(n_prior):
 	filename = savedir + '/prior_sample_%d.h5'%(i)
 	process_file(filename)
 
+n_dps = n_iters_dps * batch_size
 for i in trange(n_dps):
 	filename = savedir + '/posterior_sample_%d.h5'%(i)
 	process_file(filename, compute_crosscorr)

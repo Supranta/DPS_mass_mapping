@@ -18,14 +18,15 @@ results_folder = config['train']['results_folder']
 
 n_tomo    = config['map']['n_tomo']
 n_grid    = config['map']['n_grid']
+theta_max = config['map']['theta_max']
 
 datafile  = config['data']['datafile']
 
-modelname  = str(config['diffusion']['trained_model_name'])
-savedir    = config['diffusion']['savedir']
-batch_size = config['diffusion']['prior_batch_size']                   # Number of samples for Unconditioned sampling, only one sample produced for conditioned at a time
-n_iters    = config['diffusion']['n_prior_iterations']
-n_dps      = config['diffusion']['n_dps_samples']
+modelname   = str(config['diffusion']['trained_model_name'])
+savedir     = config['diffusion']['savedir']
+batch_size  = config['diffusion']['batch_size']                   # Number of samples for diffusion sampling
+n_iters     = config['diffusion']['n_prior_iterations']
+n_iters_dps = config['diffusion']['n_dps_iterations']
 
 KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
 KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
@@ -56,6 +57,7 @@ with h5.File(datafile, 'r') as f:
 diffusion = GaussianDiffusion(
     model,
     image_size = n_grid,
+    theta_max = theta_max,
     timesteps = 1000,    # number of steps
     sampling_timesteps = 1000, 
     noisy_image = noisy_shear_map, #Map to condition to
@@ -92,11 +94,12 @@ for n in trange(n_iters):
 			f['kappa'] = kappa_map 
 
 # Sample maps from the diffusion model posterior using DPS
-N_samples = 1 # Will create a total of n_dps posterior maps 
-for sample_id in trange(n_dps):
-    sampled_images_posterior = diffusion.sample_posterior(batch_size = 1, return_all_timesteps=False)
-    with h5.File(samples_root + '/posterior_sample_%d.h5'%(sample_id), 'w') as f:
-        kappa_dps = sampled_images_posterior.detach().cpu().numpy()
-        kappa_dps = unnorm_kappa(kappa_dps)
-        f['kappa'] = kappa_dps[0]
+for n in trange(n_iters_dps):
+    sampled_images_posterior = diffusion.sample_posterior(batch_size = batch_size, return_all_timesteps=False)
+    for i in range(batch_size):
+        sample_i = sampled_images_posterior[i].detach().cpu().squeeze().numpy()
+        kappa_map = unnorm_kappa(sample_i)
+        ind = n * batch_size + i
+        with h5.File(samples_root + '/posterior_sample_%d.h5'%(ind), 'w') as f:
+            f['kappa'] = kappa_map
 

@@ -180,27 +180,23 @@ class TorchMapTools:
         self.set_fft_properties(N_grid, self.theta_max)
         self.imag_indices = self.get_imag_indices()
 
-    def do_fwd_KS(self, kappa_l):
-        kappa_l = self.symmetrize_fourier(kappa_l)
-        kappa_l_complex = kappa_l[0] + 1j * kappa_l[1] 
-        F_gamma_1 = (self.ell_x**2 - self.ell_y**2) * kappa_l_complex / (self.ell**2)
-        F_gamma_2 = 2. * self.ell_x * self.ell_y    * kappa_l_complex / (self.ell**2)
-        
-        gamma_1 =  torch.fft.irfftn(F_gamma_1, s=(self.N_grid, self.N_grid)) / self.PIX_AREA
-        gamma_2 =  torch.fft.irfftn(F_gamma_2, s=(self.N_grid, self.N_grid)) / self.PIX_AREA
-        
-        return gamma_1, gamma_2    
-
-    def do_fwd_KS1(self, kappa, N_grid = 256, theta_max = 12., J = 1j, EPS = 1e-20): 
-        A_ell = ((self.ell_x_full**2 - self.ell_y_full**2) - 1j * (2 * self.ell_x_full * self.ell_y_full)) \
-                                            /(self.ell_full**2)
-        A_ell[0,0] = 1.
+    def do_fwd_KS(self, kappa, N_grid = 256, theta_max = 12., J = 1j, EPS = 1e-20): 
         kappa_l = torch.fft.fftn(kappa)
-        gamma = torch.fft.ifftn(kappa_l / A_ell)
+        gamma = torch.fft.ifftn(kappa_l / self.A_ell)
         gamma1 = gamma.real
         gamma2 = gamma.imag
         return gamma1,gamma2
-    
+   
+    def do_fwd_KS_batch(self, kappa_batch, N_grid=256, theta_max=12., J=1j, EPS=1e-20):
+        kappa_l_batch = torch.fft.fftn(kappa_batch, dim=(-2, -1))
+
+        gamma_batch = torch.fft.ifftn(kappa_l_batch / self.A_ell, dim=(-2, -1))
+
+        gamma1_batch = gamma_batch.real
+        gamma2_batch = gamma_batch.imag
+        
+        return gamma1_batch, gamma2_batch
+
     def do_KS_inversion(self, eps):        
         A_ell = ((self.ell_x_full**2 - self.ell_y_full**2) - 1j * (2 * self.ell_x_full * self.ell_y_full)) \
                                             /(self.ell_full**2)
@@ -252,7 +248,12 @@ class TorchMapTools:
         self.ell_y_full = torch.tile(ly[None, :], (N_grid, 1))
         self.ell_full   = torch.sqrt(self.ell_x_full**2 + self.ell_y_full**2)
         self.ell_full[0,0] = 1.
-        
+       
+        A_ell = ((self.ell_x_full**2 - self.ell_y_full**2) - 1j * (2 * self.ell_x_full * self.ell_y_full)) \
+                                            /(self.ell_full**2)
+        A_ell[0,0] = 1.
+        self.A_ell = A_ell
+
         fourier_symm_mask = torch.ones((N_grid, self.N_Y), dtype=bool, device = 'cuda:0')
         fourier_symm_mask[(self.N_Y):,0]  = 0
         fourier_symm_mask[(self.N_Y):,-1] = 0

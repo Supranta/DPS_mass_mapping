@@ -504,6 +504,7 @@ class GaussianDiffusion(Module):
         model,
         *,
         image_size,
+        theta_max,
         timesteps = 1000,
         sampling_timesteps = None,
         objective = 'pred_v',
@@ -541,6 +542,9 @@ class GaussianDiffusion(Module):
             image_size = (image_size, image_size)
         assert isinstance(image_size, (tuple, list)) and len(image_size) == 2, 'image size must be a integer or a tuple/list of two integers'
         self.image_size = image_size
+        self.n_grid     = image_size[0]
+        self.theta_max  = theta_max
+        self.map_tool   = TorchMapTools(self.n_grid, self.theta_max)
         self.n_pix = self.channels * self.image_size[0] * self.image_size[1]
         self.objective = objective
 
@@ -794,18 +798,10 @@ class GaussianDiffusion(Module):
             kappa = (field * (self.kappa_max - self.kappa_min)) + self.kappa_min
         return kappa
 
-    def torch_kappa_to_shear_old(self, kappa, N_grid = 128, theta_max = 12., J = 1j, EPS = 1e-20): 
-        torch_map_tool  = TorchMapTools(N_grid, theta_max)
-        kappa_fourier = torch_map_tool.map2fourier(kappa)
-        y_1, y_2   = torch_map_tool.do_fwd_KS(kappa_fourier)
-        shear_map = torch.stack((y_1, y_2))
-        return shear_map
-    
-    def torch_kappa_to_shear(self, kappa, N_grid = 128, theta_max = 12., J = 1j, EPS = 1e-20): 
-        torch_map_tool  = TorchMapTools(N_grid, theta_max)
-        y_1, y_2   = torch_map_tool.do_fwd_KS1(kappa)
-        shear_map = torch.stack((y_1, y_2))
-        return shear_map
+    def torch_kappa_to_shear(self, kappa_batch, N_grid=256, theta_max=12., J=1j, EPS=1e-20):
+        y_1_batch, y_2_batch = self.map_tool.do_fwd_KS_batch(kappa_batch)
+        shear_batch = torch.stack((y_1_batch, y_2_batch), dim=1)
+        return shear_batch
 
     def _internal_normalize(self, x):
         return 0.5 * (x + 1.)
@@ -819,33 +815,43 @@ class GaussianDiffusion(Module):
     def compute_grad_log_lkl(self, x_t, x_start, noisy_image, sigma_noise_var, scaling_factor=1.):
         x_start = self._internal_normalize(x_start)
         kappa_map = self.unnorm_kappa(x_start)
-        shears = []
-        len, *_ = x_start.shape
-        loglkl = 0.
+    
+        batch_size = x_start.shape[0]
+        total_loglkl = 0.
+    
         for i in range(self.channels):
-            shears_i = (self.torch_kappa_to_shear(kappa_map[:,i].squeeze(0)))
-            shears.append(shears_i)
-            loglkl += self.compute_complex_log_likelihood(shears[i], scaling_factor * noisy_image[i], sigma_noise_var)
-        loglkl.backward(retain_graph = True)
+            kappa_channel_i = kappa_map[:, i]
+        
+            shears_batch = self.torch_kappa_to_shear(kappa_channel_i)
+        
+            batch_loglkl = self.compute_complex_log_likelihood(
+                shears_batch, 
+                scaling_factor * noisy_image[i], 
+                sigma_noise_var
+            )
+        
+            total_loglkl += batch_loglkl
+    
+        total_loglkl.backward(retain_graph=True)
         grad_log_lkl = x_t.grad
+    
         return grad_log_lkl
 
-
-    def compute_complex_log_likelihood(self, noisy_pred, noisy_shear_map, sigma_noise_var):
-        # Extract real and imaginary parts
-        y_1 = noisy_pred[0]
-        y_2 = noisy_pred[1]
-
-        y_1_sim = noisy_shear_map[0]
-        y_2_sim = noisy_shear_map[1]
-
-        # Compute MSE for real and imaginary parts separately
-        real_mse = -0.5 * (y_1 - y_1_sim)**2 / (sigma_noise_var)
-        imag_mse = -0.5 * (y_2 - y_2_sim)**2 / (sigma_noise_var)
-        # Sum the MSEs for real and imaginary parts to get a real-valued loss
-        mse = real_mse + imag_mse
-        return (-mse.sum())
-        
+    def compute_complex_log_likelihood(self, noisy_pred_batch, noisy_shear_map, sigma_noise_var):
+        y_1_batch = noisy_pred_batch[:, 0]
+        y_2_batch = noisy_pred_batch[:, 1]
+    
+        y_1_obs = noisy_shear_map[0]
+        y_2_obs = noisy_shear_map[1]
+    
+        real_mse = -0.5 * (y_1_batch - y_1_obs)**2 / sigma_noise_var
+        imag_mse = -0.5 * (y_2_batch - y_2_obs)**2 / sigma_noise_var
+    
+        mse_batch = real_mse + imag_mse
+    
+        total_loglkl = -mse_batch.sum()
+    
+        return total_loglkl
 
     def ddim_sample_posterior(self, shape, noisy_image, sigma_noise, return_all_timesteps = False):
         print("DDIM Sample Posterior called")
@@ -887,7 +893,8 @@ class GaussianDiffusion(Module):
                     lkl_shift = lkl_scale * (1 - alpha_t) * (grad_log_lkl).detach()
                     x_t -= lkl_shift
                     t_list.append(time)
-                    imgs.append(x_t)
+                    if return_all_timesteps:
+                        imgs.append(x_t)
 
             else: 
                 with torch.no_grad():
