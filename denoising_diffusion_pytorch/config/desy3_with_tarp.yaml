@@ -1,0 +1,34 @@
+map:
+        n_tomo: 4                   # Number of tomographic bins
+        n_grid: 256                 # Number of pixel grids in each map
+        theta_max: 4.26666666666    # Size of the maps in degrees
+train:
+        # Training data location
+        data_folder: /home2/supranta/PosteriorSampling/data/Marco_Flagship/Flagship_covariance_small/all_patches/
+        # Where to save the diffusion models
+        results_folder: ./results_desy3
+        ntrain: 50000
+        transform:
+                exp_transform: false
+                kappa_min: -0.00842643,-0.01598292,-0.02735016,-0.03807191
+                kappa_max: 0.76519483,0.9558846,1.1022788,1.1788471
+data:
+        datafile: ./data/desy3/data_0.h5               # Data containing noisy shear data
+        neff: 1.5                                    # Effective number density in arcmin^{-2}
+        sigma_e: 0.26                                # Shape noise
+
+diffusion:
+        trained_model_name: 58
+        savedir: ./desy3_samples                   # where to save the diffusion outputs
+        n_prior_iterations: 4                        # Number of sampling iterations for the prior sampling
+        batch_size: 4                          # Batch size while sampling the prior with the diffusion model
+        n_dps_iterations: 4              # Number of DPS samples to generate
+        n_tarp_samples: 16            # Number of TARP sample maps to generate (used by TARP_dps.py)
+        n_reference_maps: 32          # Number of reference maps to generate (TARP)
+
+tarp:
+        mock_folder: ./data/desy3/noisy_mocks         # Data containing noisy mocks for TARP
+        n_noisy_mocks: 16                           # Number of noisy mocks used for TARP
+        n_tarp_simulation: 16                       # Number of simulation/prior samples to generate for TARP
+        n_tarp_posteriors: 16                         # Numnber of posterior samples to generate for TARP (used by TARP_dps.py)
+        n_tarp_reference: 32                      # Number of reference maps to generate for TARP
