@@ -136,7 +136,7 @@ for i in range(n_mocks):
     subprocess.run(['python', 'sample.py', 'temp_config.yaml', str(i)], check=True)
 
     # move posterior samples to subfolder
-    for j in range(n_simulation_samples):
+    for j in range(n_posterior_samples):
         default_output_dir = os.path.join(sample_output_dir, f'posterior_sample_{j}.h5')
         new_output_dir = os.path.join(iter_output_dir, f'posterior_sample_{j}.h5')
         if os.path.exists(default_output_dir):
@@ -229,7 +229,7 @@ def get_frac_closer_list_bin(dist, bin_num, N_maps):
     for i in range(N_maps):
         bin_posterior_dists = []
         bin_posterior_dists = [posterior[bin_num] for posterior in dist[i]['posterior_distances']]
-        frac_closer = get_closer_fraction(np.array(bin_posterior_dists), dist[i]['simulation_distance'])
+        frac_closer = get_closer_fraction(np.array(bin_posterior_dists), dist[i]['simulation_distance'][bin_num])
         frac_closer_list.append(frac_closer)
 
         stats_rows.append({
