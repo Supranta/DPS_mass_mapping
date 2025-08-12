@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import h5py
 import pandas as pd
 import numpy as np
+import random
 
 # config file
 configfile = sys.argv[1]
@@ -103,24 +104,18 @@ for i in range(n_mocks):
 # remove temp python file
 os.remove(temp_path)
 
-# run sample.py on noisy mocks to create posteriors and reference maps
+# run sample.py on noisy mocks to create posteriors
 for i in range(n_mocks):
     datafile_path = os.path.join(noisy_mock_dir, f"data_{i}.h5")
 
     # create output subfolder
     iter_output_dir = os.path.join(sample_output_dir, f'posteriors_iter_{i}')
-    reference_output_dir = os.path.join(sample_output_dir, f'reference_iter_{i}')
     os.makedirs(iter_output_dir, exist_ok=True)
-    os.makedirs(reference_output_dir, exist_ok=True)
 
     # update config
     config['data']['datafile'] = datafile_path
 
-    if (n_reference_samples % config['diffusion']['batch_size']) == 0:
-        config['diffusion']['n_prior_iterations'] = int(n_reference_samples / config['diffusion']['batch_size'])
-    else:
-        print("In the config file, n_tarp_reference should be divisible by batch_size")
-        exit(1)
+    config['diffusion']['n_prior_iterations'] = 0
 
     if (n_posterior_samples % config['diffusion']['batch_size'] == 0):
         config['diffusion']['n_dps_iterations'] = int(n_posterior_samples / config['diffusion']['batch_size'])
@@ -143,15 +138,40 @@ for i in range(n_mocks):
             shutil.move(default_output_dir, new_output_dir)
             print(f'Saved: {new_output_dir}')
 
-    # move reference samples to subfolder
-    for k in range(n_reference_samples):
-        default_output_dir = os.path.join(sample_output_dir, f'prior_sample_{k}.h5')
-        new_output_dir = os.path.join(reference_output_dir, f'reference_sample_{k}.h5')
-        if os.path.exists(default_output_dir):
-            shutil.move(default_output_dir, new_output_dir)
-            print(f'Saved: {new_output_dir}')
     # delete temp config
     os.remove('temp_config.yaml')
+
+# generate reference maps from a randomly chosen simulation map
+simulation_idx = random.randint(0, n_simulation_samples - 1)
+print("Reference samples generated from simulation index: {}".format(simulation_idx))
+datafile_path = os.path.join(noisy_mock_dir, f"data_{simulation_idx}.h5")
+reference_output_dir = os.path.join(sample_output_dir, 'reference_samples')
+os.makedirs(reference_output_dir, exist_ok=True)
+# update config
+config['data']['datafile'] = datafile_path
+
+if (n_reference_samples % config['diffusion']['batch_size']) == 0:
+    config['diffusion']['n_prior_iterations'] = int(n_reference_samples / config['diffusion']['batch_size'])
+else:
+    print("In the config file, n_tarp_reference should be divisible by batch_size")
+    exit(1)
+config['diffusion']['n_dps_iterations'] = 0
+
+# create temp config
+with open('temp_config.yaml', 'w') as f:
+    yaml.dump(config, f)
+# run sample.py with new config
+subprocess.run(['python', 'sample.py', 'temp_config.yaml'])
+
+# move reference samples to subfolder
+for i in range(n_reference_samples):
+    default_output_dir = os.path.join(sample_output_dir, f'prior_sample_{i}.h5')
+    new_output_dir = os.path.join(reference_output_dir, f'reference_sample_{i}.h5')
+    if os.path.exists(default_output_dir):
+        shutil.move(default_output_dir, new_output_dir)
+        print(f'Saved: {new_output_dir}')
+# delete temp config
+os.remove('temp_config.yaml')
 
 # calculate distances
 distance_results = []
@@ -163,7 +183,7 @@ for ref_idx in range(n_reference_samples):
             kappa_simulation = f['kappa'][:]
 
         # load reference maps
-        with h5py.File(os.path.join(sample_output_dir, f"reference_iter_{i}/reference_sample_{ref_idx}.h5"), 'r') as f:
+        with h5py.File(os.path.join(reference_output_dir, f"reference_sample_{ref_idx}.h5"), 'r') as f:
             kappa_reference = f['kappa'][:]
 
         # normalization
