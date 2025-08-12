@@ -23,8 +23,6 @@ diffusion:
         n_prior_iterations: 4                        # Number of sampling iterations for the prior sampling
         batch_size: 4                          # Batch size while sampling the prior with the diffusion model
         n_dps_iterations: 4              # Number of DPS samples to generate
-        n_tarp_samples: 16            # Number of TARP sample maps to generate (used by TARP_dps.py)
-        n_reference_maps: 32          # Number of reference maps to generate (TARP)
 
 tarp:
         mock_folder: ./data/desy3/noisy_mocks         # Data containing noisy mocks for TARP
