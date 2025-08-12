@@ -51,8 +51,9 @@ model = Unet(
 ).cuda()
 
 with h5.File(datafile, 'r') as f:
-	noisy_shear_map = torch.tensor(f['noisy_shear'][:], device='cuda') 
-	sigma_noise     = f['sigma_noise'][()]
+    noisy_shear_map = torch.tensor(f['noisy_shear'][:], device='cuda') 
+    sigma_noise     = torch.tensor(f['sigma_noise'][:], device='cuda')
+    survey_mask     = torch.tensor(f['survey_mask'][:], device='cuda')
 
 diffusion = GaussianDiffusion(
     model,
@@ -62,6 +63,7 @@ diffusion = GaussianDiffusion(
     sampling_timesteps = 1000, 
     noisy_image = noisy_shear_map, #Map to condition to
     sigma_noise = sigma_noise, #Noise specification
+    survey_mask = survey_mask,
     kappa_min = KAPPA_MIN,
     kappa_max = KAPPA_MAX,
     exp_transform = exp_transform,

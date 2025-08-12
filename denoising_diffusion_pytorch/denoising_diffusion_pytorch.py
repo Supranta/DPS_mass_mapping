@@ -516,7 +516,8 @@ class GaussianDiffusion(Module):
         kappa_min = None,
         kappa_max = None, 
         exp_transform = True, 
-        sigma_noise = None, 
+        sigma_noise = None,
+        survey_mask = None, 
         offset_noise_strength = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
         min_snr_loss_weight = False, # https://arxiv.org/abs/2303.09556
         min_snr_gamma = 5
@@ -533,6 +534,7 @@ class GaussianDiffusion(Module):
         self.kappa_min     = torch.tensor(kappa_min).to('cuda')
         self.kappa_max     = torch.tensor(kappa_max).to('cuda')
         self.sigma_noise   = sigma_noise
+        self.survey_mask   = survey_mask
         self.exp_transform = exp_transform
         if(self.exp_transform):
             self.shift = 1.1 * self.kappa_min
@@ -806,28 +808,45 @@ class GaussianDiffusion(Module):
     def _internal_normalize(self, x):
         return 0.5 * (x + 1.)
 
-    def compute_log_lkl(self, shears, noisy_image, sigma_noise):
+    def compute_complex_log_likelihood(self, noisy_pred_batch, noisy_shear_map, sigma_noise, survey_mask):
+        y_1_batch = noisy_pred_batch[:, 0]
+        y_2_batch = noisy_pred_batch[:, 1]
+    
+        y_1_obs = noisy_shear_map[0]
+        y_2_obs = noisy_shear_map[1]
+    
+        real_mse = -0.5 * survey_mask * (y_1_batch - y_1_obs)**2 / sigma_noise
+        imag_mse = -0.5 * survey_mask * (y_2_batch - y_2_obs)**2 / sigma_noise
+    
+        mse_batch = real_mse + imag_mse
+    
+        total_loglkl = -mse_batch.sum()
+    
+        return total_loglkl
+
+    def compute_log_lkl(self, shears, noisy_image, sigma_noise, survey_mask):
         loglkl = 0.
         for i in range(self.channels):
-            loglkl += self.compute_complex_log_likelihood(shears[i], noisy_image[i], sigma_noise)
+            loglkl += self.compute_complex_log_likelihood(shears[i], noisy_image[i], sigma_noise[i], survey_mask[i])
         return loglkl
 
-    def compute_grad_log_lkl(self, x_t, x_start, noisy_image, sigma_noise_var, scaling_factor=1.):
+    def compute_grad_log_lkl(self, x_t, x_start, noisy_image, sigma_noise_var, survey_mask, scaling_factor=1.):
         x_start = self._internal_normalize(x_start)
         kappa_map = self.unnorm_kappa(x_start)
     
         batch_size = x_start.shape[0]
         total_loglkl = 0.
-    
+   
         for i in range(self.channels):
             kappa_channel_i = kappa_map[:, i]
         
             shears_batch = self.torch_kappa_to_shear(kappa_channel_i)
-        
+       
             batch_loglkl = self.compute_complex_log_likelihood(
                 shears_batch, 
                 scaling_factor * noisy_image[i], 
-                sigma_noise_var
+                sigma_noise_var[i], 
+                survey_mask[i]
             )
         
             total_loglkl += batch_loglkl
@@ -837,23 +856,7 @@ class GaussianDiffusion(Module):
     
         return grad_log_lkl
 
-    def compute_complex_log_likelihood(self, noisy_pred_batch, noisy_shear_map, sigma_noise_var):
-        y_1_batch = noisy_pred_batch[:, 0]
-        y_2_batch = noisy_pred_batch[:, 1]
-    
-        y_1_obs = noisy_shear_map[0]
-        y_2_obs = noisy_shear_map[1]
-    
-        real_mse = -0.5 * (y_1_batch - y_1_obs)**2 / sigma_noise_var
-        imag_mse = -0.5 * (y_2_batch - y_2_obs)**2 / sigma_noise_var
-    
-        mse_batch = real_mse + imag_mse
-    
-        total_loglkl = -mse_batch.sum()
-    
-        return total_loglkl
-
-    def ddim_sample_posterior(self, shape, noisy_image, sigma_noise, return_all_timesteps = False):
+    def ddim_sample_posterior(self, shape, noisy_image, sigma_noise, survey_mask, return_all_timesteps = False):
         print("DDIM Sample Posterior called")
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
@@ -886,7 +889,7 @@ class GaussianDiffusion(Module):
             noise = torch.randn_like(x_t)
            
             lkl_scale = self.dps_lkl_scale(time, self.delta_t, self.sigma_t)
-            grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_noise**2)
+            grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_noise**2, survey_mask)
             if(time > 0):
                 with torch.no_grad():
                     x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
@@ -917,7 +920,7 @@ class GaussianDiffusion(Module):
         print("Sample Posterior called")
         (h, w), channels = self.image_size, self.channels
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_posterior
-        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps)
+        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, self.survey_mask, return_all_timesteps = return_all_timesteps)
 
     @torch.inference_mode()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
