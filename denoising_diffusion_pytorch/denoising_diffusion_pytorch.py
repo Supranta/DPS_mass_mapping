@@ -579,10 +579,6 @@ class GaussianDiffusion(Module):
         #self.is_ddim_sampling = self.sampling_timesteps <= timesteps
         self.ddim_sampling_eta = ddim_sampling_eta
 
-        self.delta_t = 500    # 1200
-        #self.delta_t = 2000
-        self.sigma_t = 20 
-
         # helper function to register buffer from float64 to float32
 
         register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
@@ -830,7 +826,7 @@ class GaussianDiffusion(Module):
             loglkl += self.compute_complex_log_likelihood(shears[i], noisy_image[i], sigma_noise[i], survey_mask[i])
         return loglkl
 
-    def compute_grad_log_lkl(self, x_t, x_start, noisy_image, sigma_noise_var, survey_mask, scaling_factor=1.):
+    def compute_grad_log_lkl(self, x_t, x_start, noisy_image, sigma_noise_var, survey_mask):
         x_start = self._internal_normalize(x_start)
         kappa_map = self.unnorm_kappa(x_start)
     
@@ -844,7 +840,7 @@ class GaussianDiffusion(Module):
        
             batch_loglkl = self.compute_complex_log_likelihood(
                 shears_batch, 
-                scaling_factor * noisy_image[i], 
+                noisy_image[i], 
                 sigma_noise_var[i], 
                 survey_mask[i]
             )
@@ -912,6 +908,9 @@ class GaussianDiffusion(Module):
     def set_dps_lkl_scale(self, delta_t, sigma_t):
         self.delta_t = delta_t
         self.sigma_t = sigma_t
+        print("delta_t set to %d"%(self.delta_t))
+        print("sigma_t set to %d"%(self.sigma_t))
+
 
     def dps_lkl_scale(self, time, delta_t=900, sigma_t=200):
         return 1. / (1. + np.exp(- (-time + delta_t) / sigma_t))

@@ -95,6 +95,9 @@ for n in trange(n_iters):
 		with h5.File(samples_root + '/prior_sample_%d.h5'%(ind), 'w') as f:
 			f['kappa'] = kappa_map 
 
+delta_t = config['diffusion']['lkl_scaling']['delta_t']
+sigma_t = config['diffusion']['lkl_scaling']['sigma_t']
+diffusion.set_dps_lkl_scale(delta_t, sigma_t)
 # Sample maps from the diffusion model posterior using DPS
 for n in trange(n_iters_dps):
     sampled_images_posterior = diffusion.sample_posterior(batch_size = batch_size, return_all_timesteps=False)
