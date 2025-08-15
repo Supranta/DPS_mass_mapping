@@ -874,7 +874,6 @@ class GaussianDiffusion(Module):
                 img = x_start
                 imgs.append(img)
                 continue
-            #print("x_start: "+str(x_start))
             alpha = self.alphas_cumprod[time]
             alpha_next = self.alphas_cumprod[time_next]
 
@@ -884,7 +883,7 @@ class GaussianDiffusion(Module):
             alpha_t = alpha/alpha_next
             noise = torch.randn_like(x_t)
            
-            lkl_scale = self.dps_lkl_scale(time, self.delta_t, self.sigma_t)
+            lkl_scale = self.dps_lkl_scale(time)
             grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_noise**2, survey_mask)
             if(time > 0):
                 with torch.no_grad():
@@ -906,14 +905,15 @@ class GaussianDiffusion(Module):
         return ret
 
     def set_dps_lkl_scale(self, delta_t, sigma_t):
-        self.delta_t = delta_t
-        self.sigma_t = sigma_t
-        print("delta_t set to %d"%(self.delta_t))
-        print("sigma_t set to %d"%(self.sigma_t))
+        self.delta_t = torch.tensor(delta_t).to(self.device)
+        self.sigma_t = torch.tensor(sigma_t).to(self.device)
+        print("delta_t set to: "+str(self.delta_t))
+        print("sigma_t set to: "+str(self.sigma_t))
 
 
-    def dps_lkl_scale(self, time, delta_t=900, sigma_t=200):
-        return 1. / (1. + np.exp(- (-time + delta_t) / sigma_t))
+    def dps_lkl_scale(self, time):
+        lkl_scale = 1. / (1. + torch.exp(- (-time + self.delta_t) / self.sigma_t))
+        return lkl_scale.view(1, self.channels, 1, 1)
 
     def sample_posterior(self, batch_size = 16, return_all_timesteps = False):
         print("Sample Posterior called")

@@ -95,8 +95,15 @@ for n in trange(n_iters):
 		with h5.File(samples_root + '/prior_sample_%d.h5'%(ind), 'w') as f:
 			f['kappa'] = kappa_map 
 
-delta_t = config['diffusion']['lkl_scaling']['delta_t']
-sigma_t = config['diffusion']['lkl_scaling']['sigma_t']
+def convert_string_to_array(string):
+    str_list = string.split(',')
+    arr_list = []
+    for x in str_list:
+        arr_list.append(float(x))
+    return np.array(arr_list)
+
+delta_t = convert_string_to_array(config['diffusion']['lkl_scaling']['delta_t'])
+sigma_t = convert_string_to_array(config['diffusion']['lkl_scaling']['sigma_t'])
 diffusion.set_dps_lkl_scale(delta_t, sigma_t)
 # Sample maps from the diffusion model posterior using DPS
 for n in trange(n_iters_dps):

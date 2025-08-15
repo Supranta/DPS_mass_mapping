@@ -25,6 +25,6 @@ diffusion:
         n_prior_iterations: 0                  # Number of sampling iterations for the prior sampling
         n_dps_iterations: 8                    # Number of DPS sampling iterations to generate
         lkl_scaling:
-                delta_t: 500
-                sigma_t: 20
+                delta_t: 500,500,500,500
+                sigma_t: 20,20,20,20
              
