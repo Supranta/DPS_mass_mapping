@@ -18,9 +18,25 @@ configfile = sys.argv[1]
 base_config_path = configfile
 with open(base_config_path, 'r') as f:
     config = yaml.safe_load(f)
+# lkl scaling parameters
+delta_t = config['diffusion']['lkl_scaling']['delta_t']
+sigma_t = config['diffusion']['lkl_scaling']['sigma_t']
+
+# update config
+config['data']['datafile'] = f'./data/desy3_metacal/deltat={delta_t}_sigmat={sigma_t}/patch_145.h5'
+config['diffusion']['savedir'] = f'desy3_data/patch_145/deltat={delta_t}_sigmat={sigma_t}'
+config['tarp']['mock_folder'] = f'./data/desy3_metacal/noisy_mocks/deltat={delta_t}_sigmat={sigma_t}'
+new_config_path = os.path.splitext(base_config_path)[0] + f'_deltat={delta_t}_sigmat={sigma_t}.yaml'
+with open(new_config_path, 'w') as f:
+    yaml.dump(config, f, sort_keys=False)
+with open(new_config_path, 'r') as f:
+    config = yaml.safe_load(f)
+
+os.makedirs(f'./data/desy3_metacal/deltat={delta_t}_sigmat={sigma_t}', exist_ok=True)
 
 sample_output = config['diffusion']['savedir']
-sample_output_dir = os.path.join('./samples', sample_output)
+sample_output_dir = os.path.join(f'./samples', sample_output)
+os.makedirs(sample_output_dir, exist_ok=True)
 noisy_mock_dir = config['tarp']['mock_folder']
 n_mocks = config['tarp']['n_noisy_mocks']
 os.makedirs(noisy_mock_dir, exist_ok=True)
@@ -31,11 +47,27 @@ n_posterior_samples = config['tarp']['n_tarp_posteriors']
 # number of reference maps to generate
 n_reference_samples = config['tarp']['n_tarp_reference']
 # folder to save TARP results
-tarp_results = './tarp_results'
+tarp_results = f'./tarp_results_deltat={delta_t}_sigmat={sigma_t}'
 os.makedirs(tarp_results, exist_ok=True)
 
 # create noisy data which will be sampled to create simulation maps
-subprocess.run(["python", "create_noisy_data.py", base_config_path])
+subprocess.run(["python", "create_noisy_data.py", new_config_path])
+
+# modify sigma_noise and survey mask
+temp_data_path = config['data']['datafile']
+with h5py.File(temp_data_path, 'r+') as f:
+    C, H, W = f['kappa'].shape
+    if 'survey_mask' not in f:
+        mask = np.ones((C, H, W), dtype=np.float32)
+        f.create_dataset('survey_mask', data=mask, compression='gzip', shuffle=True)
+        print(f'survey_mask created with ones of shape ({C}, {H}, {W})')
+    if f['sigma_noise'].shape == ():
+        scalar_value = float(f['sigma_noise'][()])
+        sigma_full = np.full((C, H, W), scalar_value, dtype=np.float32)
+        del f['sigma_noise']
+        f.create_dataset('sigma_noise', data=sigma_full)
+        print(f'sigma_noise created with shape ({C}, {H}, {W})')
+
 
 # run sample.py on noisy data to generate simulation maps
 # set n_prior_iterations in config based on n_simulation_samples and batch size
@@ -46,13 +78,11 @@ else:
     exit(1)
 config['diffusion']['n_dps_iterations'] = 0
 # create temp config
-with open('temp_config.yaml', 'w') as f:
+with open(f'temp_config_{delta_t}_{sigma_t}.yaml', 'w') as f:
     yaml.dump(config, f)
-subprocess.run(["python", "sample.py", 'temp_config.yaml'])
+subprocess.run(["python", "sample.py", f'temp_config_{delta_t}_{sigma_t}.yaml'])
 # delete temp config file
-os.remove('temp_config.yaml')
-# delete data file
-os.remove('./data/desy3/data_0.h5')
+os.remove(f'temp_config_{delta_t}_{sigma_t}.yaml')
 
 # move simulation maps to subfolder
 sample_subfolder = os.path.join(sample_output_dir, 'simulation_samples')
@@ -77,7 +107,7 @@ for i in range(n_mocks):
                 "with h5.File(filename, 'r') as f:\n"
                 "    kappa_map = f['kappa'][:]\n"
             )
-    temp_path = os.path.join(tmp_dir, 'create_noisy_data_temp.py')
+    temp_path = os.path.join(tmp_dir, f'create_noisy_data_{delta_t}_{sigma_t}.py')
     with open(temp_path, 'w') as f:
         f.writelines(lines)
 
@@ -94,12 +124,27 @@ for i in range(n_mocks):
     config['data']['datafile'] = output_h5
 
     # create temp config
-    with open('temp_config.yaml', 'w') as f:
+    with open(f'temp_config_{delta_t}_{sigma_t}.yaml', 'w') as f:
         yaml.dump(config, f)
 
     # call script to create noisy data
-    subprocess.run(["python", temp_path, 'temp_config.yaml'])
-    os.remove('temp_config.yaml')
+    subprocess.run(["python", temp_path, f'temp_config_{delta_t}_{sigma_t}.yaml'])
+    os.remove(f'temp_config_{delta_t}_{sigma_t}.yaml')
+
+    # modify sigma_noise and survey mask
+    temp_data_path = output_h5
+    with h5py.File(temp_data_path, 'r+') as f:
+        C, H, W = f['kappa'].shape
+        if 'survey_mask' not in f:
+            mask = np.ones((C, H, W), dtype=np.float32)
+            f.create_dataset('survey_mask', data=mask, compression='gzip', shuffle=True)
+            print(f'survey_mask created with ones of shape ({C}, {H}, {W})')
+        if f['sigma_noise'].shape == ():
+            scalar_value = float(f['sigma_noise'][()])
+            sigma_full = np.full((C, H, W), scalar_value, dtype=np.float32)
+            del f['sigma_noise']
+            f.create_dataset('sigma_noise', data=sigma_full)
+            print(f'sigma_noise created with shape ({C}, {H}, {W})')
 
 # remove temp python file
 os.remove(temp_path)
@@ -124,11 +169,11 @@ for i in range(n_mocks):
         exit(1)
 
     # create temp config
-    with open('temp_config.yaml', 'w') as f:
+    with open(f'temp_config_{delta_t}_{sigma_t}.yaml', 'w') as f:
         yaml.dump(config, f)
 
     # run sample.py with new config
-    subprocess.run(['python', 'sample.py', 'temp_config.yaml', str(i)], check=True)
+    subprocess.run(['python', 'sample.py', f'temp_config_{delta_t}_{sigma_t}.yaml', str(i)], check=True)
 
     # move posterior samples to subfolder
     for j in range(n_posterior_samples):
@@ -139,7 +184,7 @@ for i in range(n_mocks):
             print(f'Saved: {new_output_dir}')
 
     # delete temp config
-    os.remove('temp_config.yaml')
+    os.remove(f'temp_config_{delta_t}_{sigma_t}.yaml')
 
 # generate reference maps from a randomly chosen simulation map
 simulation_idx = random.randint(0, n_simulation_samples - 1)
@@ -158,10 +203,10 @@ else:
 config['diffusion']['n_dps_iterations'] = 0
 
 # create temp config
-with open('temp_config.yaml', 'w') as f:
+with open(f'temp_config_{delta_t}_{sigma_t}.yaml', 'w') as f:
     yaml.dump(config, f)
 # run sample.py with new config
-subprocess.run(['python', 'sample.py', 'temp_config.yaml'])
+subprocess.run(['python', 'sample.py', f'temp_config_{delta_t}_{sigma_t}.yaml'])
 
 # move reference samples to subfolder
 for i in range(n_reference_samples):
@@ -171,7 +216,7 @@ for i in range(n_reference_samples):
         shutil.move(default_output_dir, new_output_dir)
         print(f'Saved: {new_output_dir}')
 # delete temp config
-os.remove('temp_config.yaml')
+os.remove(f'temp_config_{delta_t}_{sigma_t}.yaml')
 
 # calculate distances
 distance_results = []
@@ -325,7 +370,7 @@ coverage_probability_arr_bin3 = np.array(coverage_probability_list_bin3)
 plt.figure()
 plt.xlabel('Credibility level')
 plt.ylabel('Coverage probability')
-plt.title('Coverage probability vs credibility level (all bins)')
+plt.title(f'Coverage probability vs credibility level (all bins, sigma_t = {sigma_t}, delta_t = {delta_t})')
 plt.plot(alpha, alpha, 'r')
 plt.plot(alpha, coverage_probability_arr)
 plt.savefig(f'{tarp_results}/coverage_probability.png', dpi = 300, bbox_inches = 'tight')
@@ -334,7 +379,7 @@ plt.close()
 plt.figure()
 plt.xlabel('Credibility level')
 plt.ylabel('Coverage probability')
-plt.title('Coverage probability vs credibility level (bin 0)')
+plt.title(f'Coverage probability vs credibility level (bin 0, sigma_t = {sigma_t}, delta_t = {delta_t})')
 plt.plot(alpha, alpha, 'r')
 plt.plot(alpha, coverage_probability_arr_bin0)
 plt.savefig(f'{tarp_results}/coverage_probability_bin0.png', dpi = 300, bbox_inches = 'tight')
@@ -343,7 +388,7 @@ plt.close()
 plt.figure()
 plt.xlabel('Credibility level')
 plt.ylabel('Coverage probability')
-plt.title('Coverage probability vs credibility level (bin 1)')
+plt.title(f'Coverage probability vs credibility level (bin 1, sigma_t = {sigma_t}, delta_t = {delta_t})')
 plt.plot(alpha, alpha, 'r')
 plt.plot(alpha, coverage_probability_arr_bin1)
 plt.savefig(f'{tarp_results}/coverage_probability_bin1.png', dpi = 300, bbox_inches = 'tight')
@@ -352,7 +397,7 @@ plt.close()
 plt.figure()
 plt.xlabel('Credibility level')
 plt.ylabel('Coverage probability')
-plt.title('Coverage probability vs credibility level (bin 2)')
+plt.title(f'Coverage probability vs credibility level (bin 2, sigma_t = {sigma_t}, delta_t = {delta_t})')
 plt.plot(alpha, alpha, 'r')
 plt.plot(alpha, coverage_probability_arr_bin2)
 plt.savefig(f'{tarp_results}/coverage_probability_bin2.png', dpi = 300, bbox_inches = 'tight')
@@ -361,8 +406,11 @@ plt.close()
 plt.figure()
 plt.xlabel('Credibility level')
 plt.ylabel('Coverage probability')
-plt.title('Coverage probability vs credibility level (bin 3)')
+plt.title(f'Coverage probability vs credibility level (bin 3, sigma_t = {sigma_t}, delta_t = {delta_t})')
 plt.plot(alpha, alpha, 'r')
 plt.plot(alpha, coverage_probability_arr_bin3)
 plt.savefig(f'{tarp_results}/coverage_probability_bin3.png', dpi = 300, bbox_inches = 'tight')
 plt.close()
+
+# remove custom config
+os.remove(new_config_path)
