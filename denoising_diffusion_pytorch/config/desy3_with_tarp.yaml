@@ -12,20 +12,24 @@ train:
                 exp_transform: false
                 kappa_min: -0.00842643,-0.01598292,-0.02735016,-0.03807191
                 kappa_max: 0.76519483,0.9558846,1.1022788,1.1788471
+
 data:
-        datafile: ./data/desy3/data_0.h5               # Data containing noisy shear data
-        neff: 1.5                                    # Effective number density in arcmin^{-2}
-        sigma_e: 0.26                                # Shape noise
+        datafile: ./data/desy3_metacal/patch_145.h5  # Data containing noisy shear data 
+        neff: 1.475                                    # Effective number density in arcmin^{-2} 
+        sigma_e: 0.26                                # Shape noise 
 
 diffusion:
         trained_model_name: 58
-        savedir: ./desy3_samples                   # where to save the diffusion outputs
-        n_prior_iterations: 4                        # Number of sampling iterations for the prior sampling
-        batch_size: 4                          # Batch size while sampling the prior with the diffusion model
-        n_dps_iterations: 4              # Number of DPS samples to generate
-
+        savedir: desy3_data/patch_145          # where to save the diffusion outputs
+        batch_size: 8                          # Batch size while sampling with the diffusion model
+        n_prior_iterations: 0                  # Number of sampling iterations for the prior sampling
+        n_dps_iterations: 8                    # Number of DPS sampling iterations to generate
+        lkl_scaling:
+                delta_t: 20000,20000,20000,20000
+                sigma_t: 0.0000001,0.0000001,0.0000001,0.0000001
+             
 tarp:
-        mock_folder: ./data/desy3/noisy_mocks         # Data containing noisy mocks for TARP
+        mock_folder: ./data/desy3_metacal/noisy_mocks         # Data containing noisy mocks for TARP
         n_noisy_mocks: 16                           # Number of noisy mocks used for TARP
         n_tarp_simulation: 16                       # Number of simulation/prior samples to generate for TARP
         n_tarp_posteriors: 16                         # Numnber of posterior samples to generate for TARP (used by TARP_dps.py)
