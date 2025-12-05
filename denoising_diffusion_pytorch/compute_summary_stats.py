@@ -32,6 +32,10 @@ try:
 except:
 	compute_crosscorr = False
 
+if(compute_crosscorr):
+    with h5.File(datafile, 'r') as f:
+        kappa_true = f['kappa'][:]
+
 N_ell_bins  = 21
 
 ps_calculator = PowerSpectrumCalculator(n_grid, theta_max)

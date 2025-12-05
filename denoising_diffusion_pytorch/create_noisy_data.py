@@ -32,7 +32,7 @@ def torch_shear_to_kappa(shear):
     return kappa
 
 def torch_kappa_to_shear(kappa): 
-    y_1, y_2   = torch_map_tool.do_fwd_KS1(kappa)
+    y_1, y_2   = torch_map_tool.do_fwd_KS(kappa)
     shear_map = torch.stack((y_1, y_2))
     return shear_map
 
@@ -99,9 +99,11 @@ pix_area          = Delta_theta**2                      # Pixel area in arcmin^2
 sigma_noise       = neff2noise(sigma_e, neff, pix_area) # Estimates the Gaussian noise in each pixel given the effective number density and the pixel area
 
 # Create noisy data measurement
-n_ind     = 439
-filename  = data_folder + "/%d.npy"%(n_ind)
-kappa_map = np.load(filename)    
+#n_ind     = 439
+#filename  = data_folder + "/%d.npy"%(n_ind)
+#kappa_map = np.load(filename)    
+with h5.File('./samples/desy3_data/patch_145/prior_sample_1.h5', 'r') as f:
+    kappa_map = f['kappa'][:]
 kappa_map = torch.tensor(kappa_map)
 
 kappa_map = kappa_map.to('cuda')
@@ -128,5 +130,6 @@ with h5.File(datafile, 'w') as f:
     f['noisy_shear'] = np.array([noisy_shear_map_tomo[i].cpu().numpy() for i in range(n_tomo)])
     f['KS_map']      = np.array([KS_inv_map_tomo[i].cpu().numpy() for i in range(n_tomo)])
     f['neff']        = neff       
-    f['sigma_noise'] = sigma_noise
+    f['sigma_noise'] = sigma_noise * np.ones((n_tomo, n_grid, n_grid))
+    f['survey_mask'] = np.ones((n_tomo, n_grid, n_grid))
 
