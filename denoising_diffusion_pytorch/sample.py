@@ -84,6 +84,27 @@ name = savedir
 samples_root = os.path.join("./samples", name)
 os.makedirs(samples_root, exist_ok=True)
 
+# Compute and save Maximum Likelihood map
+print("Computing Maximum Likelihood map...")
+kappa_ml = diffusion.compute_maximum_likelihood_map(
+    noisy_shear_map, 
+    sigma_noise, 
+    survey_mask,
+    learning_rate=1e-3,
+    num_iterations=5000,
+    verbose=True
+)
+
+# Convert to numpy and unnormalize
+ml_map = kappa_ml[0].detach().cpu().numpy()  # Remove batch dimension
+kappa_ml_unnorm = unnorm_kappa(ml_map)
+
+# Save ML map
+with h5.File(samples_root + '/ml_map.h5', 'w') as f:
+    f['kappa'] = kappa_ml_unnorm
+
+print(f"Maximum Likelihood map saved to {samples_root}/ml_map.h5")
+
 # Sample unconditioned maps from the diffusion model
 # Creates a total of n_iters * batch_size maps
 for n in trange(n_iters):

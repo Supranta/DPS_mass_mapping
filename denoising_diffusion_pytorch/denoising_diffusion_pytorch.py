@@ -921,6 +921,76 @@ class GaussianDiffusion(Module):
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_posterior
         return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, self.survey_mask, return_all_timesteps = return_all_timesteps)
 
+    def compute_maximum_likelihood_map(self, noisy_image, sigma_noise, survey_mask, 
+                                   learning_rate=1e-3, num_iterations=1000, 
+                                   verbose=True):
+        """
+        Compute maximum likelihood estimate of kappa map by direct optimization.
+    
+        Args:
+            noisy_image: Observed noisy shear data [channels, 2, H, W]
+            sigma_noise: Noise standard deviation for each channel [channels]
+            survey_mask: Binary mask indicating valid pixels [channels, H, W]
+            learning_rate: Learning rate for optimization
+            num_iterations: Number of optimization iterations
+            verbose: Whether to print progress
+        
+        Returns:
+            kappa_ml: Maximum likelihood kappa map [1, channels, H, W]
+        """
+        device = self.device
+        (h, w), channels = self.image_size, self.channels
+    
+        # Initialize kappa in normalized space (between -1 and 1)
+        x_init = torch.zeros(1, channels, h, w, device=device, requires_grad=True)
+    
+        optimizer = torch.optim.Adam([x_init], lr=learning_rate)
+    
+        if verbose:
+            iterator = tqdm(range(num_iterations), desc='ML Optimization')
+        else:
+            iterator = range(num_iterations)
+    
+        for iteration in iterator:
+            optimizer.zero_grad()
+        
+            # Convert normalized x to kappa
+            x_normalized = self._internal_normalize(x_init)
+            kappa_map = self.unnorm_kappa(x_normalized)
+        
+            # Compute negative log likelihood (loss to minimize)
+            total_loglkl = 0.
+            for i in range(channels):
+                kappa_channel_i = kappa_map[:, i]
+            
+                # Compute shear from kappa
+                shears_batch = self.torch_kappa_to_shear(kappa_channel_i)
+            
+                # Compute log likelihood for this channel
+                batch_loglkl = self.compute_complex_log_likelihood(
+                    shears_batch, 
+                    noisy_image[i], 
+                    sigma_noise[i]**2, 
+                    survey_mask[i]
+                )
+            
+                total_loglkl += batch_loglkl
+        
+            # Minimize negative log likelihood
+            loss = total_loglkl
+            loss.backward()
+            optimizer.step()
+        
+            if verbose and iteration % 100 == 0:
+                iterator.set_postfix({'neg_log_likelihood': loss.item()})
+    
+        # Return final maximum likelihood estimate
+        with torch.no_grad():
+            x_normalized = self._internal_normalize(x_init)
+            kappa_ml = self.unnorm_kappa(x_normalized)
+    
+        return kappa_ml
+
     @torch.inference_mode()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
         b, *_, device = *x1.shape, x1.device
