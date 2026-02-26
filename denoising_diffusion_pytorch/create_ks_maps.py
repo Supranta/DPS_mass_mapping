@@ -84,34 +84,23 @@ name = savedir
 samples_root = os.path.join("./samples", name)
 os.makedirs(samples_root, exist_ok=True)
 
-# Sample unconditioned maps from the diffusion model
-# Creates a total of n_iters * batch_size maps
-for n in trange(n_iters):
-	sampled_images = diffusion.sample(batch_size = batch_size, return_all_timesteps = False)
-	for i in trange(batch_size):
-		sample_i = sampled_images[i].detach().cpu().squeeze().numpy()
-		kappa_map = unnorm_kappa(sample_i)
-		ind = n * batch_size + i
-		with h5.File(samples_root + '/prior_sample_%d.h5'%(ind), 'w') as f:
-			f['kappa'] = kappa_map 
+# Compute and save Maximum Likelihood map
+print("Computing Maximum Likelihood map...")
+kappa_ml = diffusion.compute_maximum_likelihood_map(
+    noisy_shear_map, 
+    sigma_noise, 
+    survey_mask,
+    learning_rate=1e-1,
+    num_iterations=2000,
+    verbose=True
+)
 
-def convert_string_to_array(string):
-    str_list = string.split(',')
-    arr_list = []
-    for x in str_list:
-        arr_list.append(float(x))
-    return np.array(arr_list)
+# Convert to numpy and unnormalize
+kappa_ml = kappa_ml[0].detach().cpu().numpy()  # Remove batch dimension
 
-delta_t = convert_string_to_array(config['diffusion']['lkl_scaling']['delta_t'])
-sigma_t = convert_string_to_array(config['diffusion']['lkl_scaling']['sigma_t'])
-diffusion.set_dps_lkl_scale(delta_t, sigma_t)
-# Sample maps from the diffusion model posterior using DPS
-for n in trange(n_iters_dps):
-    sampled_images_posterior = diffusion.sample_posterior(batch_size = batch_size, return_all_timesteps=False)
-    for i in range(batch_size):
-        sample_i = sampled_images_posterior[i].detach().cpu().squeeze().numpy()
-        kappa_map = unnorm_kappa(sample_i)
-        ind = n * batch_size + i
-        with h5.File(samples_root + '/posterior_sample_%d.h5'%(ind), 'w') as f:
-            f['kappa'] = kappa_map
+# Save ML map
+with h5.File(samples_root + '/ks_map.h5', 'w') as f:
+    f['kappa'] = kappa_ml
+
+print(f"Maximum Likelihood map saved to {samples_root}/ks_map.h5")
 

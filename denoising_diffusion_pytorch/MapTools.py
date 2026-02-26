@@ -29,7 +29,7 @@ class MapTools:
         kappa_l = self.symmetrize_fourier(kappa_l)
         kappa_l_complex = kappa_l[0] + J * kappa_l[1] 
 
-        F_gamma_1 = (self.ell_x**2 - self.ell_y**2) * kappa_l_complex / (self.ell**2)
+        F_gamma_1 = (self.ell_y**2 - self.ell_x**2) * kappa_l_complex / (self.ell**2)
         F_gamma_2 = 2. * self.ell_x * self.ell_y    * kappa_l_complex / (self.ell**2)
         
         gamma_1 =  np.fft.irfftn(F_gamma_1) / self.PIX_AREA
@@ -39,7 +39,7 @@ class MapTools:
     
     def do_KS_inversion(self, eps, J = 1j, EPS = 1e-20):    
 
-        A_ell = ((self.ell_x_full**2 - self.ell_y_full**2) - J * (2 * self.ell_x_full * self.ell_y_full)) \
+        A_ell = ((self.ell_y_full**2 - self.ell_x_full**2) - J * (2 * self.ell_x_full * self.ell_y_full)) \
                                             /(self.ell_full**2)  
         
         eps_1, eps_2 = eps
@@ -198,7 +198,7 @@ class TorchMapTools:
         return gamma1_batch, gamma2_batch
 
     def do_KS_inversion(self, eps):        
-        A_ell = ((self.ell_x_full**2 - self.ell_y_full**2) - 1j * (2 * self.ell_x_full * self.ell_y_full)) \
+        A_ell = ((self.ell_y_full**2 - self.ell_x_full**2) - 1j * (2 * self.ell_x_full * self.ell_y_full)) \
                                             /(self.ell_full**2)
         
         eps_1, eps_2 = eps
@@ -249,7 +249,7 @@ class TorchMapTools:
         self.ell_full   = torch.sqrt(self.ell_x_full**2 + self.ell_y_full**2)
         self.ell_full[0,0] = 1.
        
-        A_ell = ((self.ell_x_full**2 - self.ell_y_full**2) - 1j * (2 * self.ell_x_full * self.ell_y_full)) \
+        A_ell = ((self.ell_y_full**2 - self.ell_x_full**2) - 1j * (2 * self.ell_x_full * self.ell_y_full)) \
                                             /(self.ell_full**2)
         A_ell[0,0] = 1.
         self.A_ell = A_ell

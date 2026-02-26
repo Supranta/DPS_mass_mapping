@@ -903,7 +903,7 @@ class GaussianDiffusion(Module):
         self.t_list = t_list
         ret = self.unnormalize(ret)
         return ret
-
+    
     def set_dps_lkl_scale(self, delta_t, sigma_t):
         self.delta_t = torch.tensor(delta_t).to(self.device)
         self.sigma_t = torch.tensor(sigma_t).to(self.device)
