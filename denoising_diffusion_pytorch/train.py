@@ -12,7 +12,8 @@ with open(configfile, 'r') as f:
 
 data_folder    = config['train']['data_folder']
 results_folder = config['train']['results_folder']
-ntrain         = config['train']['ntrain']
+nsteps         = config['train']['nsteps']
+n_patches      = config['train']['n_patches']
 
 n_tomo    = config['map']['n_tomo']
 n_grid    = config['map']['n_grid']
@@ -53,11 +54,12 @@ lr           = base_lr * n_gpus * n_accumulate
 #Adjust training specifications
 trainer = Trainer(
     diffusion,
-    data_folder, 
+    data_folder,
     train_batch_size = 24,
     train_lr = lr,
     save_and_sample_every = 2000,
-    train_num_steps = ntrain,                 # total training steps
+    train_num_steps = nsteps,                 # total training steps
+    n_patches = n_patches,                    # number of training patches
     gradient_accumulate_every = n_accumulate, # gradient accumulation steps
     ema_decay = 0.995,                        # exponential moving average decay
     amp = True,                               # turn on mixed precision

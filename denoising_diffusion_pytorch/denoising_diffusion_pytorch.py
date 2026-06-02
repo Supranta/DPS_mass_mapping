@@ -1077,9 +1077,9 @@ class GaussianDiffusion(Module):
 
 # dataset classes
 class WLDataset(Dataset):
-    def __init__(self, folder, KAPPA_MIN, KAPPA_MAX, exp_transform=True, N_train=100000):
+    def __init__(self, folder, KAPPA_MIN, KAPPA_MAX, exp_transform=True, N_patches=100000):
         super().__init__()
-        self.N_train = N_train
+        self.N_patches = N_patches
         self.folder = folder
         self.kappa_min = KAPPA_MIN
         self.kappa_max = KAPPA_MAX
@@ -1090,7 +1090,7 @@ class WLDataset(Dataset):
             self.y_max = np.log(self.kappa_max - self.shift)
 
     def __len__(self):
-        return self.N_train
+        return self.N_patches
 
     def __getitem__(self, index):
         kappa = np.load(self.folder + '/%d.npy'%(index+1))
@@ -1114,6 +1114,7 @@ class Trainer:
         augment_horizontal_flip = True,
         train_lr = 1e-4,
         train_num_steps = 100000,
+        n_patches = 100000,
         ema_update_every = 10,
         ema_decay = 0.995,
         adam_betas = (0.9, 0.99),
@@ -1165,10 +1166,11 @@ class Trainer:
 
         # dataset and dataloader
 
-        self.ds = WLDataset(folder, 
-                            diffusion_model.kappa_min.cpu().numpy(), 
-                            diffusion_model.kappa_max.cpu().numpy(), 
-                            exp_transform=diffusion_model.exp_transform)
+        self.ds = WLDataset(folder,
+                            diffusion_model.kappa_min.cpu().numpy(),
+                            diffusion_model.kappa_max.cpu().numpy(),
+                            exp_transform=diffusion_model.exp_transform,
+                            N_patches=n_patches)
 
         assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'
 
