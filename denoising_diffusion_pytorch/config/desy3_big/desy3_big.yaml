@@ -1,0 +1,43 @@
+map:
+        n_tomo: 4                   # Number of tomographic bins
+        n_grid: 256                 # Number of pixels per side
+        theta_max: 8.53333333333    # Full patch size in degrees (512 arcmin = 256 px × 2 arcmin/px)
+
+train:
+        # Training data location (Marco Flagship, 512 arcmin patches)
+        data_folder: /home2/supranta/PosteriorSampling/data/Marco_Flagship/all_patches_big
+        # Where to save the diffusion model checkpoints
+        results_folder: ./results_desy3_big
+        nsteps: 6100        # number of training loop iterations
+        n_patches: 550     # number of training patch files used (1.npy … n_patches.npy)
+        transform:
+                exp_transform: false
+                kappa_min: -0.009597688913345337,-0.019036399200558662,-0.032695673406124115,-0.04423563927412033
+                kappa_max: 0.7335715889930725,0.913153886795044,1.0367798805236816,1.129138708114624
+
+# ---------------------------------------------------------------------------
+# The fields below (data, diffusion) are used by inference scripts, not by
+# train.py. They are placeholders — fill in before running inference.
+# ---------------------------------------------------------------------------
+
+data:
+        trained_model_name: 1
+        # TODO: update to the new DES-Y3 512 arcmin patch file
+        datafile: ./data/des_y3_metacal_big/patch_0.h5
+        # TODO: confirm neff for the new 512 arcmin patches (value below is from
+        # the old 256 arcmin DES-Y3 metacal runs)
+        neff: 1.475                 # Effective number density in arcmin^{-2}
+        sigma_e: 0.26               # Shape noise (unchanged)
+
+diffusion:
+        # TODO: set to the checkpoint number of the trained model once available
+        # TODO: update savedir per patch for inference runs
+        savedir: desy3_big_samples
+        batch_size: 8
+        n_prior_iterations: 0
+        n_dps_iterations: 8
+        # TODO: lkl_scaling (delta_t, sigma_t) was tuned for 256 arcmin patches;
+        # needs retuning for the larger 512 arcmin field of view.
+        lkl_scaling:
+                delta_t: 150,450,500,500
+                sigma_t: 70,70,20,20
