@@ -517,10 +517,11 @@ class GaussianDiffusion(Module):
         kappa_max = None, 
         exp_transform = True, 
         sigma_noise = None,
-        survey_mask = None, 
+        survey_mask = None,
         offset_noise_strength = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
         min_snr_loss_weight = False, # https://arxiv.org/abs/2303.09556
-        min_snr_gamma = 5
+        min_snr_gamma = 5,
+        tau_hat_sq = None,           # measured per-channel variance of x_start; used by pigdm_calibrated
     ):
         super().__init__()
         assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
@@ -536,6 +537,14 @@ class GaussianDiffusion(Module):
         self.sigma_noise   = sigma_noise
         self.survey_mask   = survey_mask
         self.exp_transform = exp_transform
+        # Per-channel variance of x_start (network's [-1,1] representation).
+        # Used by pigdm_calibrated to correct the r_t^2 schedule.
+        # Defaults to ones (= tau^2=1 assumption, same as pigdm_flat).
+        _tau = (tau_hat_sq if tau_hat_sq is not None
+                else torch.ones(self.channels))
+        self.register_buffer('tau_hat_sq',
+                             torch.as_tensor(_tau, dtype=torch.float32)
+                             .reshape(self.channels, 1, 1))
         if(self.exp_transform):
             self.shift = 1.1 * self.kappa_min
             self.y_min = torch.log(self.kappa_min - self.shift)
@@ -849,10 +858,79 @@ class GaussianDiffusion(Module):
     
         total_loglkl.backward(retain_graph=True)
         grad_log_lkl = x_t.grad
-    
+
         return grad_log_lkl
 
-    def ddim_sample_posterior(self, shape, noisy_image, sigma_noise, survey_mask, return_all_timesteps = False):
+    def pigdm_sigma_eff2(self, time, sigma_noise):
+        """Effective noise variance for the ΠGDM flat-noise approximation.
+
+        Approximates the extra covariance term r_t^2 * H H^T as a flat scalar
+        per tomographic channel, valid in the no-mask limit where |F(l)| = 1
+        for all modes l (a property of the Kaiser-Squires operator).
+
+        The effective variance is:
+            sigma_eff2_i = sigma_noise_i^2 + r_t^2 * c_i^2 / 2
+        where c_i = 0.5 * (kappa_max_i - kappa_min_i) is the Jacobian of the
+        affine unnorm_kappa transform, and r_t^2 = 1 - alphas_cumprod[t].
+
+        NOTE: requires exp_transform=False (affine unnorm_kappa). With a
+        nonlinear transform the Jacobian is not a constant and this formula
+        does not apply.
+
+        Args:
+            time: integer diffusion timestep
+            sigma_noise: per-channel noise std, broadcastable to [channels, 1, 1]
+        Returns:
+            sigma_eff2: effective noise variance, shape [channels, 1, 1]
+        """
+        assert not self.exp_transform, (
+            "pigdm_sigma_eff2 requires exp_transform=False (affine kappa transform)"
+        )
+        r_t_sq = 1. - self.alphas_cumprod[time]           # scalar
+        c = 0.5 * (self.kappa_max - self.kappa_min)        # [channels, 1, 1]
+        extra_noise = r_t_sq * c ** 2 / 2.
+        return sigma_noise ** 2 + extra_noise
+
+    def pigdm_r_t_sq(self, time):
+        """Posterior variance of x_0 | x_t under the calibrated prior N(0, tau_hat_sq).
+
+        General conjugate-Gaussian formula:
+            r_t^2 = (v_t * tau_hat_sq) / (alpha_t * tau_hat_sq + v_t)
+
+        where v_t = 1 - alphas_cumprod[t] and alpha_t = alphas_cumprod[t].
+
+        When tau_hat_sq == 1 this reduces exactly to 1 - alphas_cumprod[t],
+        recovering the pigdm_flat schedule as a special case.
+
+        Returns shape [channels, 1, 1].
+        """
+        v_t     = 1. - self.alphas_cumprod[time]   # scalar
+        alpha_t = self.alphas_cumprod[time]         # scalar
+        return (v_t * self.tau_hat_sq) / (alpha_t * self.tau_hat_sq + v_t)
+
+    def pigdm_sigma_eff2_calibrated(self, time, sigma_noise):
+        """Effective noise variance using the calibrated r_t^2 schedule.
+
+        Identical to pigdm_sigma_eff2 except r_t^2 is computed from the
+        measured training-data variance tau_hat_sq rather than assuming
+        tau_hat_sq = 1. Use guidance_method='pigdm_calibrated' to invoke this.
+
+        Args:
+            time: integer diffusion timestep
+            sigma_noise: per-channel noise std, broadcastable to [channels, 1, 1]
+        Returns:
+            sigma_eff2: effective noise variance, shape [channels, 1, 1]
+        """
+        assert not self.exp_transform, (
+            "pigdm_sigma_eff2_calibrated requires exp_transform=False"
+        )
+        r_t_sq      = self.pigdm_r_t_sq(time)              # [channels, 1, 1]
+        c           = 0.5 * (self.kappa_max - self.kappa_min)
+        extra_noise = r_t_sq * c ** 2 / 2.
+        return sigma_noise ** 2 + extra_noise
+
+    def ddim_sample_posterior(self, shape, noisy_image, sigma_noise, survey_mask,
+                               guidance_method="dps_sigmoid", return_all_timesteps=False):
         print("DDIM Sample Posterior called")
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
@@ -863,7 +941,7 @@ class GaussianDiffusion(Module):
         imgs = [x_t]
         t_list = []
         x_start = torch.zeros(shape, device = device)
-        
+
         ind = 0
         for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
             x_t.requires_grad = True
@@ -882,19 +960,29 @@ class GaussianDiffusion(Module):
 
             alpha_t = alpha/alpha_next
             noise = torch.randn_like(x_t)
-           
-            lkl_scale = self.dps_lkl_scale(time)
-            grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_noise**2, survey_mask)
+
+            if guidance_method == "pigdm_flat":
+                sigma_eff2 = self.pigdm_sigma_eff2(time, sigma_noise)
+                grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_eff2, survey_mask)
+            elif guidance_method == "pigdm_calibrated":
+                sigma_eff2 = self.pigdm_sigma_eff2_calibrated(time, sigma_noise)
+                grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_eff2, survey_mask)
+            else:  # "dps_sigmoid"
+                lkl_scale = self.dps_lkl_scale(time)
+                grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_noise**2, survey_mask)
             if(time > 0):
                 with torch.no_grad():
                     x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
-                    lkl_shift = lkl_scale * (1 - alpha_t) * (grad_log_lkl).detach()
+                    if guidance_method in ("pigdm_flat", "pigdm_calibrated"):
+                        lkl_shift = (1 - alpha_t) * grad_log_lkl.detach()
+                    else:  # "dps_sigmoid"
+                        lkl_shift = lkl_scale * (1 - alpha_t) * grad_log_lkl.detach()
                     x_t -= lkl_shift
                     t_list.append(time)
                     if return_all_timesteps:
                         imgs.append(x_t)
 
-            else: 
+            else:
                 with torch.no_grad():
                     x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
             ind += 1
@@ -905,8 +993,8 @@ class GaussianDiffusion(Module):
         return ret
     
     def set_dps_lkl_scale(self, delta_t, sigma_t):
-        self.delta_t = torch.tensor(delta_t).to(self.device)
-        self.sigma_t = torch.tensor(sigma_t).to(self.device)
+        self.delta_t = torch.tensor(delta_t, dtype=torch.float32).to(self.device)
+        self.sigma_t = torch.tensor(sigma_t, dtype=torch.float32).to(self.device)
         print("delta_t set to: "+str(self.delta_t))
         print("sigma_t set to: "+str(self.sigma_t))
 
@@ -915,13 +1003,406 @@ class GaussianDiffusion(Module):
         lkl_scale = 1. / (1. + torch.exp(- (-time + self.delta_t) / self.sigma_t))
         return lkl_scale.view(1, self.channels, 1, 1)
 
-    def sample_posterior(self, batch_size = 16, return_all_timesteps = False):
+    def sample_posterior(self, batch_size=16, guidance_method="dps_sigmoid", return_all_timesteps=False):
         print("Sample Posterior called")
         (h, w), channels = self.image_size, self.channels
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_posterior
-        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, self.survey_mask, return_all_timesteps = return_all_timesteps)
+        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise,
+                         self.survey_mask, guidance_method=guidance_method,
+                         return_all_timesteps=return_all_timesteps)
 
-    def compute_maximum_likelihood_map(self, noisy_image, sigma_noise, survey_mask, 
+    # ------------------------------------------------------------------
+    # TDS (Twisted Diffusion Sampler) helpers and main loop
+    # ------------------------------------------------------------------
+
+    def _log_lkl_per_particle_channel(self, shear_pred, obs_shear, sigma_noise_sq, mask):
+        """Gaussian log-likelihood per particle for one tomographic bin.
+
+        Sums over (H, W) but keeps the particle (batch) dimension.
+
+        Args:
+            shear_pred:    predicted shear [K, 2, H, W]
+            obs_shear:     observed shear  [2, H, W]
+            sigma_noise_sq: per-pixel noise variance [H, W]
+            mask:          survey mask [H, W]
+
+        Returns:
+            log_lkl: [K]
+        """
+        chi2 = (
+            -0.5 * mask * (shear_pred[:, 0] - obs_shear[0]) ** 2 / sigma_noise_sq
+            - 0.5 * mask * (shear_pred[:, 1] - obs_shear[1]) ** 2 / sigma_noise_sq
+        )  # [K, H, W]
+        return chi2.sum(dim=(-2, -1))  # [K]
+
+    def _compute_log_lkl_per_particle(self, x_start, sigma_eff2=None):
+        """Twisting function: log p(d | x_hat_0) evaluated per particle.
+
+        Takes the Tweedie estimate in network space ([-1, 1]), converts to
+        physical kappa via the stored normalisation, applies the KS forward
+        operator, and evaluates the Gaussian shear likelihood.
+
+        Args:
+            x_start:    Tweedie estimate [K, C, H, W] in [-1, 1]
+            sigma_eff2: effective noise variance per channel [C, 1, 1], or None.
+                        If None, uses self.sigma_noise[i]**2 (DPS / fixed noise).
+                        Pass pigdm_sigma_eff2(time, self.sigma_noise) for the
+                        ΠGDM time-dependent twisting function.
+
+        Returns:
+            log_lkl: [K] per-particle log-likelihood (no gradient)
+        """
+        with torch.no_grad():
+            x_norm  = self._internal_normalize(x_start)   # [-1,1] -> [0,1]
+            kappa   = self.unnorm_kappa(x_norm)            # [0,1]  -> physical
+            log_lkl = torch.zeros(x_start.shape[0], device=x_start.device)
+            for i in range(self.channels):
+                noise_var = sigma_eff2[i] if sigma_eff2 is not None else self.sigma_noise[i] ** 2
+                shears    = self.torch_kappa_to_shear(kappa[:, i])   # [K, 2, H, W]
+                log_lkl  += self._log_lkl_per_particle_channel(
+                    shears,
+                    self.noisy_image[i],
+                    noise_var,
+                    self.survey_mask[i],
+                )
+        return log_lkl
+
+    def _compute_dps_scaled_log_lkl_per_particle(self, x_start, time):
+        """Sigmoid-annealed twisting function for TDS + DPS.
+
+        Computes lkl_scale(t) * log p(y | x_hat_0; sigma_noise²), where
+        lkl_scale(t) is the same per-channel sigmoid schedule used in the
+        DPS proposal gradient.  This ensures the SMC twisting function is
+        consistent with the proposal, unlike the plain 'dps_sigmoid' mode
+        which only scales the proposal but uses an unscaled twisting function.
+
+        Requires set_dps_lkl_scale() to have been called beforehand.
+
+        Args:
+            x_start: Tweedie estimate [K, C, H, W] in [-1, 1]
+            time:    integer diffusion timestep (used to evaluate lkl_scale)
+
+        Returns:
+            log_lkl: [K] scaled per-particle log-likelihood (no gradient)
+        """
+        lkl_scale = self.dps_lkl_scale(time)   # [1, C, 1, 1]
+        with torch.no_grad():
+            x_norm  = self._internal_normalize(x_start)
+            kappa   = self.unnorm_kappa(x_norm)
+            log_lkl = torch.zeros(x_start.shape[0], device=x_start.device)
+            for i in range(self.channels):
+                shears      = self.torch_kappa_to_shear(kappa[:, i])
+                channel_lkl = self._log_lkl_per_particle_channel(
+                    shears,
+                    self.noisy_image[i],
+                    self.sigma_noise[i] ** 2,
+                    self.survey_mask[i],
+                )
+                log_lkl += lkl_scale[0, i, 0, 0] * channel_lkl
+        return log_lkl
+
+    @staticmethod
+    def _compute_ess(log_weights):
+        """Effective sample size from unnormalised log-weights.
+
+        ESS = (sum w)^2 / sum(w^2), computed stably in log-space.
+        Returns a scalar in [1, K].
+        """
+        log_w = log_weights - log_weights.max()
+        w     = log_w.exp()
+        return (w.sum() ** 2 / (w ** 2).sum()).item()
+
+    @staticmethod
+    def _systematic_resample(log_weights):
+        """Systematic resampling from unnormalised log-weights.
+
+        Returns an index tensor of shape [K] suitable for indexing into the
+        particle batch dimension.
+        """
+        K     = log_weights.shape[0]
+        log_w = log_weights - torch.logsumexp(log_weights, dim=0)
+        w     = log_w.exp()
+        cumw  = torch.cumsum(w, dim=0)
+
+        # One random offset shared across all K strata
+        u         = torch.rand(1, device=log_weights.device) / K
+        positions = u + torch.arange(K, device=log_weights.device, dtype=torch.float32) / K
+        indices   = torch.searchsorted(cumw.contiguous(), positions.contiguous())
+        return indices.clamp(0, K - 1)
+
+    def ddim_sample_tds(self, shape, noisy_image, sigma_noise, survey_mask,
+                        ess_threshold=0.95, grad_batch_size=None,
+                        guidance_method="dps_sigmoid", return_all_timesteps=False):
+        """Twisted Diffusion Sampler (TDS) via SMC particle filtering.
+
+        Wraps the existing DDIM-DPS proposal inside an SMC loop with
+        exact importance weights.
+
+        Three guidance methods are supported via `guidance_method`:
+
+        "dps_sigmoid" (default):
+            Proposal gradient scaled by dps_lkl_scale(t); twisting function
+            uses fixed sigma_noise**2 (time-independent).  The proposal and
+            twisting function are inconsistent in their time-dependence.
+
+        "dps_sigmoid_annealed":
+            Proposal gradient scaled by dps_lkl_scale(t) (same as above).
+            Twisting function is also sigmoid-annealed:
+                psi_t(x_hat_0) = lkl_scale(t) * log p(y | x_hat_0; sigma_noise²)
+            This makes the SMC weights consistent with the time-annealed
+            proposal and is the principled TDS variant for DPS-style guidance.
+            Requires set_dps_lkl_scale() to have been called.
+
+        "pigdm_flat":
+            The twisting function uses the ΠGDM effective noise variance
+                sigma_eff2_i(t) = sigma_noise_i**2 + (1-alphabar_t) * c_i**2 / 2
+            where c_i = 0.5*(kappa_max_i - kappa_min_i) is the affine-transform
+            Jacobian.  This is a principled, schedule-free approximation that
+            accounts for the uncertainty in x_hat_0 given x_t; it requires
+            exp_transform=False.  The dps_lkl_scale factor is dropped from the
+            proposal shift (it is already absorbed into sigma_eff2).
+
+        "pigdm_calibrated":
+            Like "pigdm_flat" but uses the measured tau_hat_sq (per-channel
+            variance of x_start) instead of assuming tau²=1.
+
+        Args:
+            shape:           (K, C, H, W) — K is the number of particles
+            noisy_image:     observed shear [n_tomo, 2, H, W]
+            sigma_noise:     per-pixel noise std [n_tomo, H, W]
+            survey_mask:     binary mask [n_tomo, H, W]
+            ess_threshold:   resample when ESS < ess_threshold * K (default 0.5)
+            guidance_method: "dps_sigmoid", "dps_sigmoid_annealed", "pigdm_flat",
+                             or "pigdm_calibrated"
+            return_all_timesteps: if True, also return intermediate states
+
+        Returns:
+            samples:    unnormalised kappa maps [K, C, H, W]
+            log_weights: final unnormalised log-weights [K]
+        """
+        K, device = shape[0], self.device
+        total_timesteps    = self.num_timesteps
+        sampling_timesteps = self.sampling_timesteps
+        eta                = self.ddim_sampling_eta
+
+        # grad_batch_size controls how many particles are processed per backward
+        # pass.  Defaults to K (no sub-batching).  Set it smaller to trade
+        # runtime for lower peak GPU memory when K is large.
+        if grad_batch_size is None:
+            grad_batch_size = K
+
+        times      = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
+        times      = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:]))
+
+        # ---- Initialise K particles from the prior ----
+        x_t = torch.randn(shape, device=device)
+
+        # Initial twisting function at t=T, sub-batched to control memory
+        if guidance_method == "pigdm_flat":
+            sigma_eff2_T = self.pigdm_sigma_eff2(times[0], sigma_noise)
+        elif guidance_method == "pigdm_calibrated":
+            sigma_eff2_T = self.pigdm_sigma_eff2_calibrated(times[0], sigma_noise)
+        else:
+            sigma_eff2_T = None
+        log_w_parts = []
+        with torch.no_grad():
+            for b0 in range(0, K, grad_batch_size):
+                b1     = min(b0 + grad_batch_size, K)
+                tc_sub = torch.full((b1 - b0,), times[0], device=device, dtype=torch.long)
+                _, x_start_sub = self.model_predictions(
+                    x_t[b0:b1], tc_sub, clip_x_start=True, rederive_pred_noise=True
+                )
+                if guidance_method == "dps_sigmoid_annealed":
+                    log_w_parts.append(
+                        self._compute_dps_scaled_log_lkl_per_particle(x_start_sub, times[0])
+                    )
+                else:
+                    log_w_parts.append(
+                        self._compute_log_lkl_per_particle(x_start_sub, sigma_eff2=sigma_eff2_T)
+                    )
+        log_w = torch.cat(log_w_parts)
+
+        ess_history = []
+        imgs        = [x_t] if return_all_timesteps else []
+
+        for time, time_next in tqdm(time_pairs, desc='TDS sampling loop'):
+            # ---- Conditionally resample ----
+            ess = self._compute_ess(log_w)
+            ess_history.append(ess)
+
+            if ess < ess_threshold * K:
+                indices = self._systematic_resample(log_w)
+                x_t     = x_t[indices].clone()
+                log_w   = torch.zeros(K, device=device)
+
+            # Effective noise variance at the current and next timestep.
+            # For "dps_sigmoid" both are None (fixed sigma_noise^2 used inside
+            # _compute_log_lkl_per_particle).  For "pigdm_flat" the twisting
+            # function is time-dependent: sigma_eff2(t) is used for log_twist_old
+            # and the proposal gradient, sigma_eff2(t_next) for log_twist_new.
+            if guidance_method == "pigdm_flat":
+                sigma_eff2_t      = self.pigdm_sigma_eff2(time,      sigma_noise)
+                sigma_eff2_t_next = self.pigdm_sigma_eff2(time_next, sigma_noise) if time_next >= 0 else None
+            elif guidance_method == "pigdm_calibrated":
+                sigma_eff2_t      = self.pigdm_sigma_eff2_calibrated(time,      sigma_noise)
+                sigma_eff2_t_next = self.pigdm_sigma_eff2_calibrated(time_next, sigma_noise) if time_next >= 0 else None
+            else:
+                sigma_eff2_t      = None
+                sigma_eff2_t_next = None
+
+            # ---- Sub-batched model forward + proposal gradient ----
+            # Each sub-batch of grad_batch_size particles gets its own
+            # forward+backward pass, keeping peak activation memory fixed
+            # regardless of K.
+            x_start_parts       = []
+            pred_noise_parts    = []
+            grad_parts          = []
+            log_twist_old_parts = []
+
+            for b0 in range(0, K, grad_batch_size):
+                b1      = min(b0 + grad_batch_size, K)
+                x_t_sub = x_t[b0:b1].detach().requires_grad_(True)
+                tc_sub  = torch.full((b1 - b0,), time, device=device, dtype=torch.long)
+
+                pred_noise_sub, x_start_sub = self.model_predictions(
+                    x_t_sub, tc_sub, clip_x_start=True, rederive_pred_noise=True
+                )
+
+                if guidance_method == "dps_sigmoid_annealed":
+                    log_twist_old_parts.append(
+                        self._compute_dps_scaled_log_lkl_per_particle(x_start_sub.detach(), time)
+                    )
+                else:
+                    log_twist_old_parts.append(
+                        self._compute_log_lkl_per_particle(x_start_sub.detach(), sigma_eff2=sigma_eff2_t)
+                    )
+
+                if time > 0:
+                    grad_noise_var = sigma_eff2_t if guidance_method in ("pigdm_flat", "pigdm_calibrated") else sigma_noise ** 2
+                    grad_sub = self.compute_grad_log_lkl(
+                        x_t_sub, x_start_sub, noisy_image, grad_noise_var, survey_mask
+                    )
+                    grad_parts.append(grad_sub.detach())
+                else:
+                    grad_parts.append(torch.zeros_like(x_t_sub))
+
+                x_start_parts.append(x_start_sub.detach())
+                pred_noise_parts.append(pred_noise_sub.detach())
+
+            x_start       = torch.cat(x_start_parts)
+            pred_noise    = torch.cat(pred_noise_parts)
+            grad_log_lkl  = torch.cat(grad_parts)
+            log_twist_old = torch.cat(log_twist_old_parts)
+
+            # ---- Terminal step: x_0 = x_start, no stochastic proposal ----
+            # At t=0, r_t^2 = 0, so sigma_eff2 = sigma_noise^2 for both methods.
+            if time_next < 0:
+                x_t = x_start
+                log_twist_new = self._compute_log_lkl_per_particle(x_t, sigma_eff2=None)
+                log_w = log_w + log_twist_new - log_twist_old
+                break
+
+            # ---- DDIM step parameters ----
+            alpha      = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+            alpha_t    = alpha / alpha_next
+
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c     = (1 - alpha_next - sigma ** 2).sqrt()
+
+            # x_start and pred_noise are already detached; mu_uncond has no grad
+            mu_uncond = x_start * alpha_next.sqrt() + c * pred_noise
+            noise     = torch.randn(shape, device=device)
+
+            if time > 0 and sigma > 1e-8:
+                if guidance_method in ("pigdm_flat", "pigdm_calibrated"):
+                    # No sigmoid rescaling — sigma_eff2 already encodes the
+                    # time-dependent attenuation of the likelihood gradient.
+                    lkl_shift = (1 - alpha_t) * grad_log_lkl
+                else:  # "dps_sigmoid" or "dps_sigmoid_annealed"
+                    lkl_scale = self.dps_lkl_scale(time)
+                    lkl_shift = lkl_scale * (1 - alpha_t) * grad_log_lkl
+
+                mu_proposal = mu_uncond - lkl_shift
+                x_next      = mu_proposal + sigma * noise
+
+                # log p_theta(x_next|x_t) - log q(x_next|x_t,d)
+                # x_next - mu_uncond   = sigma*noise - lkl_shift
+                # x_next - mu_proposal = sigma*noise
+                # ratio = [(noise·lkl_shift)/sigma - ||lkl_shift||²/(2σ²)]  per particle
+                dot_noise_shift   = (noise * lkl_shift).sum(dim=(1, 2, 3))   # [K]
+                dot_sq_shift      = (lkl_shift ** 2).sum(dim=(1, 2, 3))      # [K]
+                log_density_ratio = dot_noise_shift / sigma - dot_sq_shift / (2 * sigma ** 2)
+            else:
+                x_next            = mu_uncond + sigma * noise
+                log_density_ratio = torch.zeros(K, device=device)
+
+            # ---- New twisting function at proposed x_next, sub-batched ----
+            # Uses sigma_eff2 at time_next (different from the current step).
+            log_twist_new_parts = []
+            with torch.no_grad():
+                for b0 in range(0, K, grad_batch_size):
+                    b1     = min(b0 + grad_batch_size, K)
+                    tc_sub = torch.full((b1 - b0,), time_next, device=device, dtype=torch.long)
+                    _, x_start_next_sub = self.model_predictions(
+                        x_next[b0:b1], tc_sub, clip_x_start=True, rederive_pred_noise=True
+                    )
+                    if guidance_method == "dps_sigmoid_annealed":
+                        log_twist_new_parts.append(
+                            self._compute_dps_scaled_log_lkl_per_particle(x_start_next_sub, time_next)
+                        )
+                    else:
+                        log_twist_new_parts.append(
+                            self._compute_log_lkl_per_particle(x_start_next_sub, sigma_eff2=sigma_eff2_t_next)
+                        )
+            log_twist_new = torch.cat(log_twist_new_parts)
+
+            # ---- Update log-weights ----
+            log_w = log_w + log_density_ratio + log_twist_new - log_twist_old
+
+            x_t = x_next.detach()
+            if return_all_timesteps:
+                imgs.append(x_t)
+
+        self.tds_ess_history = ess_history
+
+        ret = self.unnormalize(x_t)
+        if return_all_timesteps:
+            ret = torch.stack([self.unnormalize(img) for img in imgs], dim=1)
+
+        return ret, log_w.detach()
+
+    def sample_tds(self, n_particles=8, grad_batch_size=None,
+                   ess_threshold=0.5, guidance_method="dps_sigmoid",
+                   return_all_timesteps=False):
+        """Draw posterior samples using the Twisted Diffusion Sampler.
+
+        Args:
+            n_particles:     number of SMC particles (K=1 reduces to DPS)
+            grad_batch_size: particles per backward pass; controls peak GPU
+                             memory.  None means process all K at once.
+            ess_threshold:   resample when ESS < ess_threshold * K
+            guidance_method: "dps_sigmoid" or "pigdm_flat" — controls both the
+                             proposal gradient and the twisting function used in
+                             the importance weights (see ddim_sample_tds docstring)
+            return_all_timesteps: return intermediate states too
+
+        Returns:
+            samples:     [K, C, H, W] unnormalised kappa maps
+            log_weights: [K] final log-importance weights
+        """
+        (h, w), channels = self.image_size, self.channels
+        shape = (n_particles, channels, h, w)
+        return self.ddim_sample_tds(
+            shape, self.noisy_image, self.sigma_noise, self.survey_mask,
+            ess_threshold=ess_threshold,
+            grad_batch_size=grad_batch_size,
+            guidance_method=guidance_method,
+            return_all_timesteps=return_all_timesteps,
+        )
+
+    def compute_maximum_likelihood_map(self, noisy_image, sigma_noise, survey_mask,
                                    learning_rate=1e-3, num_iterations=1000, 
                                    verbose=True):
         """
@@ -1257,12 +1738,14 @@ class Trainer:
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=device)
 
         model = self.accelerator.unwrap_model(self.model)
-        model.load_state_dict(data['model'])
+        # strict=False allows loading checkpoints saved before tau_hat_sq was
+        # added as a buffer; the buffer is already correctly initialized in __init__
+        model.load_state_dict(data['model'], strict=False)
 
         self.step = data['step']
         self.opt.load_state_dict(data['opt'])
         if self.accelerator.is_main_process:
-            self.ema.load_state_dict(data["ema"])
+            self.ema.load_state_dict(data["ema"], strict=False)
 
         if 'version' in data:
             print(f"loading from version {data['version']}")

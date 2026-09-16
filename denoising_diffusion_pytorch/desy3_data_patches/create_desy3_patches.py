@@ -9,7 +9,7 @@ Patch geometry (all dimensions in arcmin unless noted):
   Overlap:      180 arcmin  between adjacent patches (~2.4× sky redundancy)
 
 Output HDF5 per patch:
-  noisy_shear   (4, 2, 256, 256)  — [-g1, -g2] per tomo bin; NaN → 0
+  noisy_shear   (4, 2, 256, 256)  — [+g1, -g2] per tomo bin; NaN → 0
   sigma_noise   (4,    256, 256)  — sqrt(sigma2) per tomo bin; NaN → 100
   survey_mask   (4,    256, 256)  — float 0/1; buffer pixels forced to 0
   patch_center  (2,)              — [ra_centre, dec_centre] in degrees
@@ -220,7 +220,7 @@ def assemble_dps_arrays(bin_results, buffer_pix):
         g1[np.isnan(g1)] = 0.0
         g2[np.isnan(g2)] = 0.0
 
-        noisy_shear[i, 0] = -g1
+        noisy_shear[i, 0] = g1
         noisy_shear[i, 1] = -g2
 
         # Large noise for unobserved pixels → down-weighted in DPS likelihood
