@@ -30,18 +30,8 @@ n_iters_dps = config['diffusion']['n_dps_iterations']
 
 KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
 KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
-exp_transform = config['train']['transform']['exp_transform']
-
-def unnorm_kappa(field, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX, exp_transform = exp_transform):
-    if(exp_transform):
-        shift = 1.1 * kappa_min
-        y_min = np.log(kappa_min - shift)
-        y_max = np.log(kappa_max - shift)
-        y = (field * (y_max - y_min)) + y_min
-        kappa = np.exp(y) + shift
-    else:
-        kappa = (field * (kappa_max - kappa_min)) + kappa_min
-    return kappa
+def unnorm_kappa(field, kappa_min = KAPPA_MIN, kappa_max = KAPPA_MAX):
+    return (field * (kappa_max - kappa_min)) + kappa_min
 
 # Define the diffusion model architecture
 model = Unet(
@@ -66,7 +56,6 @@ diffusion = GaussianDiffusion(
     survey_mask = survey_mask,
     kappa_min = KAPPA_MIN,
     kappa_max = KAPPA_MAX,
-    exp_transform = exp_transform,
     ddim_sampling_eta = 1.
 ).cuda()
 
@@ -87,11 +76,11 @@ os.makedirs(samples_root, exist_ok=True)
 # Compute and save Maximum Likelihood map
 print("Computing Maximum Likelihood map...")
 kappa_ml = diffusion.compute_maximum_likelihood_map(
-    noisy_shear_map, 
-    sigma_noise, 
+    noisy_shear_map,
+    sigma_noise,
     survey_mask,
     learning_rate=1e-1,
-    num_iterations=2000,
+    num_iterations=1000,
     verbose=True
 )
 

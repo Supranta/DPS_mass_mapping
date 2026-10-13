@@ -26,12 +26,11 @@ except:
 
 KAPPA_MIN = string_to_numpy_array(config['train']['transform']['kappa_min'])[:,np.newaxis,np.newaxis]
 KAPPA_MAX = string_to_numpy_array(config['train']['transform']['kappa_max'])[:,np.newaxis,np.newaxis]
-exp_transform = config['train']['transform']['exp_transform']
 
-#Adjust model architecture 
+#Adjust model architecture
 model = Unet(
     dim = 64,
-    flash_attn = False, 
+    flash_attn = False,
     channels = n_tomo
 ).cuda()
 
@@ -44,7 +43,6 @@ diffusion = GaussianDiffusion(
     sampling_timesteps = 999,
     kappa_min = KAPPA_MIN,
     kappa_max = KAPPA_MAX,
-    exp_transform = exp_transform
 ).cuda()
 
 n_gpus       = 3

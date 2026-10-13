@@ -514,14 +514,19 @@ class GaussianDiffusion(Module):
         auto_normalize = True,
         noisy_image = None,
         kappa_min = None,
-        kappa_max = None, 
-        exp_transform = True, 
+        kappa_max = None,
         sigma_noise = None,
         survey_mask = None,
         offset_noise_strength = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
         min_snr_loss_weight = False, # https://arxiv.org/abs/2303.09556
         min_snr_gamma = 5,
         tau_hat_sq = None,           # measured per-channel variance of x_start; used by pigdm_calibrated
+        # GRF-DPS parameters (identity forward operator A=I)
+        power_spectrum = None,       # (C, H, W//2+1) real tensor — Pκ(ℓ) in [-1,1] units
+        y_fft = None,                # (C, H, W//2+1) complex tensor — rfft2(y, norm='ortho')
+        y_observation_norm = None,   # (C, H, W) real tensor — y in [-1,1] units (for dps_identity)
+        sigma_n_sq = None,           # float — per-pixel noise variance in [-1,1] units
+        grf_guidance_scale = 1.0,    # scale factor on the GRF likelihood step
     ):
         super().__init__()
         assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
@@ -536,7 +541,6 @@ class GaussianDiffusion(Module):
         self.kappa_max     = torch.tensor(kappa_max).to('cuda')
         self.sigma_noise   = sigma_noise
         self.survey_mask   = survey_mask
-        self.exp_transform = exp_transform
         # Per-channel variance of x_start (network's [-1,1] representation).
         # Used by pigdm_calibrated to correct the r_t^2 schedule.
         # Defaults to ones (= tau^2=1 assumption, same as pigdm_flat).
@@ -545,10 +549,27 @@ class GaussianDiffusion(Module):
         self.register_buffer('tau_hat_sq',
                              torch.as_tensor(_tau, dtype=torch.float32)
                              .reshape(self.channels, 1, 1))
-        if(self.exp_transform):
-            self.shift = 1.1 * self.kappa_min
-            self.y_min = torch.log(self.kappa_min - self.shift)
-            self.y_max = torch.log(self.kappa_max - self.shift)
+
+        # GRF-DPS buffers — only registered when the method is used.
+        # These are optional; other guidance methods leave them as None.
+        self.sigma_n_sq        = float(sigma_n_sq) if sigma_n_sq is not None else None
+        self.grf_guidance_scale = float(grf_guidance_scale)
+        if power_spectrum is not None:
+            self.register_buffer('power_spectrum',
+                                 power_spectrum.float())
+        else:
+            self.power_spectrum = None
+        if y_fft is not None:
+            self.register_buffer('y_fft',
+                                 y_fft.to(torch.complex64))
+        else:
+            self.y_fft = None
+        if y_observation_norm is not None:
+            self.register_buffer('y_observation_norm',
+                                 y_observation_norm.float())
+        else:
+            self.y_observation_norm = None
+
         if isinstance(image_size, int):
             image_size = (image_size, image_size)
         assert isinstance(image_size, (tuple, list)) and len(image_size) == 2, 'image size must be a integer or a tuple/list of two integers'
@@ -798,12 +819,7 @@ class GaussianDiffusion(Module):
         return sample_fn((batch_size, channels, h, w), return_all_timesteps = return_all_timesteps)
 
     def unnorm_kappa(self, field):
-        if(self.exp_transform):
-            y = (field * (self.y_max - self.y_min)) + self.y_min
-            kappa = torch.exp(y) + self.shift
-        else:          
-            kappa = (field * (self.kappa_max - self.kappa_min)) + self.kappa_min
-        return kappa
+        return (field * (self.kappa_max - self.kappa_min)) + self.kappa_min
 
     def torch_kappa_to_shear(self, kappa_batch, N_grid=256, theta_max=12., J=1j, EPS=1e-20):
         y_1_batch, y_2_batch = self.map_tool.do_fwd_KS_batch(kappa_batch)
@@ -873,19 +889,12 @@ class GaussianDiffusion(Module):
         where c_i = 0.5 * (kappa_max_i - kappa_min_i) is the Jacobian of the
         affine unnorm_kappa transform, and r_t^2 = 1 - alphas_cumprod[t].
 
-        NOTE: requires exp_transform=False (affine unnorm_kappa). With a
-        nonlinear transform the Jacobian is not a constant and this formula
-        does not apply.
-
         Args:
             time: integer diffusion timestep
             sigma_noise: per-channel noise std, broadcastable to [channels, 1, 1]
         Returns:
             sigma_eff2: effective noise variance, shape [channels, 1, 1]
         """
-        assert not self.exp_transform, (
-            "pigdm_sigma_eff2 requires exp_transform=False (affine kappa transform)"
-        )
         r_t_sq = 1. - self.alphas_cumprod[time]           # scalar
         c = 0.5 * (self.kappa_max - self.kappa_min)        # [channels, 1, 1]
         extra_noise = r_t_sq * c ** 2 / 2.
@@ -921,9 +930,6 @@ class GaussianDiffusion(Module):
         Returns:
             sigma_eff2: effective noise variance, shape [channels, 1, 1]
         """
-        assert not self.exp_transform, (
-            "pigdm_sigma_eff2_calibrated requires exp_transform=False"
-        )
         r_t_sq      = self.pigdm_r_t_sq(time)              # [channels, 1, 1]
         c           = 0.5 * (self.kappa_max - self.kappa_min)
         extra_noise = r_t_sq * c ** 2 / 2.
@@ -942,12 +948,21 @@ class GaussianDiffusion(Module):
         t_list = []
         x_start = torch.zeros(shape, device = device)
 
+        # GRF-DPS computes an analytic likelihood score; no backprop through the model needed.
+        needs_backprop = guidance_method != 'grf_dps'
+
         ind = 0
         for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
-            x_t.requires_grad = True
+            if needs_backprop:
+                x_t.requires_grad = True
             time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
             self_cond = x_start if self.self_condition else None
-            pred_noise, x_start, *_ = self.model_predictions(x_t, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+            if needs_backprop:
+                pred_noise, x_start, *_ = self.model_predictions(x_t, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+            else:
+                with torch.no_grad():
+                    pred_noise, x_start, *_ = self.model_predictions(x_t, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+
             if time_next < 0:
                 img = x_start
                 imgs.append(img)
@@ -958,26 +973,72 @@ class GaussianDiffusion(Module):
             sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
             c = (1 - alpha_next - sigma ** 2).sqrt()
 
-            alpha_t = alpha/alpha_next
+            alpha_t = alpha/alpha_next   # single-step alpha (ᾱt / ᾱ_{t-1})
             noise = torch.randn_like(x_t)
 
-            if guidance_method == "pigdm_flat":
+            if guidance_method == "grf_dps":
+                # ----------------------------------------------------------
+                # Analytic GRF likelihood score ∇_xt log pG(y|xt), Eq. 27.
+                # αt_bar = sqrt(ᾱt) and σt² = 1 - ᾱt use the cumulative schedule.
+                # See grf_score.py for the derivation; inlined here to avoid
+                # import-path complexity.
+                # ----------------------------------------------------------
+                alpha_t_bar = self.sqrt_alphas_cumprod[time]        # αt in PDF notation
+                sigma_t_sq  = 1.0 - self.alphas_cumprod[time]       # σt²
+                x_t_fft     = torch.fft.rfft2(x_t, norm='ortho')    # (B, C, H, W//2+1)
+                sigma_post  = 1.0 / (
+                    1.0 / self.sigma_n_sq
+                    + alpha_t_bar**2 / sigma_t_sq
+                    + 1.0 / self.power_spectrum
+                )
+                mu_fft = sigma_post * (
+                    self.y_fft / self.sigma_n_sq
+                    + alpha_t_bar * x_t_fft / sigma_t_sq
+                )
+                score_fft = (
+                    (alpha_t_bar / sigma_t_sq) * mu_fft
+                    - x_t_fft / sigma_t_sq
+                    + x_t_fft / (alpha_t_bar**2 * self.power_spectrum + sigma_t_sq)
+                )
+                grf_score = torch.fft.irfft2(
+                    score_fft, s=(x_t.shape[-2], x_t.shape[-1]), norm='ortho'
+                )
+            elif guidance_method == "dps_identity":
+                # ----------------------------------------------------------
+                # DPS with identity forward model (A = I): y = x0 + n.
+                # Backprop the MSE residual through the Tweedie denoiser.
+                # Sign convention: grad_log_lkl = ∇_xt [sum (y-x_hat_0)²/σn²]
+                # is the gradient of the *negative* log-likelihood, so
+                # x_t -= (1-alpha_t)*grad_log_lkl is a gradient-ascent step.
+                # ----------------------------------------------------------
+                residual_sq_sum = (
+                    (self.y_observation_norm.unsqueeze(0) - x_start) ** 2
+                    / self.sigma_n_sq
+                ).sum()
+                residual_sq_sum.backward(retain_graph=True)
+                grad_log_lkl = x_t.grad
+            elif guidance_method == "pigdm_flat":
                 sigma_eff2 = self.pigdm_sigma_eff2(time, sigma_noise)
                 grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_eff2, survey_mask)
             elif guidance_method == "pigdm_calibrated":
                 sigma_eff2 = self.pigdm_sigma_eff2_calibrated(time, sigma_noise)
                 grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_eff2, survey_mask)
-            else:  # "dps_sigmoid"
+            else:  # "dps_sigmoid" or "dps_sigmoid_annealed"
                 lkl_scale = self.dps_lkl_scale(time)
                 grad_log_lkl = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_noise**2, survey_mask)
+
             if(time > 0):
                 with torch.no_grad():
                     x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
-                    if guidance_method in ("pigdm_flat", "pigdm_calibrated"):
-                        lkl_shift = (1 - alpha_t) * grad_log_lkl.detach()
+                    if guidance_method == "grf_dps":
+                        # grf_score = ∇_xt log pG(y|xt): add to ascend the likelihood.
+                        x_t = x_t + self.grf_guidance_scale * (1 - alpha_t) * grf_score
+                    elif guidance_method == "dps_identity":
+                        x_t = x_t - (1 - alpha_t) * grad_log_lkl.detach()
+                    elif guidance_method in ("pigdm_flat", "pigdm_calibrated"):
+                        x_t = x_t - (1 - alpha_t) * grad_log_lkl.detach()
                     else:  # "dps_sigmoid"
-                        lkl_shift = lkl_scale * (1 - alpha_t) * grad_log_lkl.detach()
-                    x_t -= lkl_shift
+                        x_t = x_t - lkl_scale * (1 - alpha_t) * grad_log_lkl.detach()
                     t_list.append(time)
                     if return_all_timesteps:
                         imgs.append(x_t)
@@ -1158,9 +1219,9 @@ class GaussianDiffusion(Module):
                 sigma_eff2_i(t) = sigma_noise_i**2 + (1-alphabar_t) * c_i**2 / 2
             where c_i = 0.5*(kappa_max_i - kappa_min_i) is the affine-transform
             Jacobian.  This is a principled, schedule-free approximation that
-            accounts for the uncertainty in x_hat_0 given x_t; it requires
-            exp_transform=False.  The dps_lkl_scale factor is dropped from the
-            proposal shift (it is already absorbed into sigma_eff2).
+            accounts for the uncertainty in x_hat_0 given x_t.  The
+            dps_lkl_scale factor is dropped from the proposal shift (it is
+            already absorbed into sigma_eff2).
 
         "pigdm_calibrated":
             Like "pigdm_flat" but uses the measured tau_hat_sq (per-channel
@@ -1402,6 +1463,416 @@ class GaussianDiffusion(Module):
             return_all_timesteps=return_all_timesteps,
         )
 
+    def _grf_marginal_lkl_per_particle(self, x_t, time):
+        """Analytic GRF-marginalized log-likelihood log p_G(y | x_t).
+
+        Marginalizes x_0 out under the GRF prior using the exact Gaussian
+        convolution formula in Fourier space.  No neural network is invoked.
+
+        The normalization constant (which depends on t but not on x_t) is
+        dropped: it contributes identically to all K particles at a given t
+        and cancels after weight normalization.
+
+        Args:
+            x_t:  [K, C, H, W] particles in [-1, 1] normalized space.
+            time: int, current diffusion timestep.
+
+        Returns:
+            log_lkl: [K] per-particle log-likelihoods (unnormalized).
+        """
+        alpha_t    = self.sqrt_alphas_cumprod[time]          # scalar
+        sigma_t_sq = 1.0 - self.alphas_cumprod[time]         # scalar
+
+        # GRF posterior variance of x_0 | x_t, per Fourier mode.
+        # Written to avoid division by zero when sigma_t_sq → 0.
+        # Shape: [C, H, W//2+1]
+        Gamma_t   = sigma_t_sq * self.power_spectrum / (
+            sigma_t_sq + alpha_t ** 2 * self.power_spectrum
+        )
+
+        # Prediction of y in Fourier space:
+        # ρ_ℓ = (α_t P_κ_ℓ / (σ_t² + α_t² P_κ_ℓ)) * x_t_ℓ
+        # Numerically stable form avoids dividing by sigma_t_sq.
+        W_pred   = alpha_t * self.power_spectrum / (
+            sigma_t_sq + alpha_t ** 2 * self.power_spectrum
+        )  # [C, H, W//2+1]
+        x_t_fft  = torch.fft.rfft2(x_t, norm='ortho')        # [K, C, H, W//2+1]
+        rho_fft  = W_pred.unsqueeze(0) * x_t_fft             # [K, C, H, W//2+1]
+
+        # Total variance per mode and residual.
+        total_var = Gamma_t + self.sigma_n_sq                 # [C, H, W//2+1]
+        resid_fft = self.y_fft.unsqueeze(0) - rho_fft        # [K, C, H, W//2+1]
+
+        # Unnormalized log-likelihood: −Σ_ℓ |r_ℓ|² / (2 V_ℓ)
+        log_lkl = -(
+            resid_fft.abs() ** 2 / (2.0 * total_var.unsqueeze(0))
+        ).sum(dim=(1, 2, 3))
+        return log_lkl
+
+    def ddim_sample_tds_grf(self, shape, ess_threshold=0.5, guidance_scale=1.0,
+                            return_all_timesteps=False):
+        """TDS using the analytic GRF-marginalized likelihood as twisting function.
+
+        Replaces the standard TDS Tweedie twisting function ψ_t(x̂₀) with the
+        exact GRF-marginalized likelihood p_G(y | x_t), which is analytic in
+        Fourier space.  This removes the need for backpropagation entirely —
+        both the proposal gradient and the twisting function evaluations are
+        computed analytically, at the cost of assuming a GRF prior on x_0.
+
+        The proposal uses the same analytic GRF score as in the grf_dps method.
+
+        The importance weight increment per step is:
+            Δ log w = log p_uncond(x_next | x_t) − log q(x_next | x_t)
+                    + log p_G(y | x_next) − log p_G(y | x_t)
+
+        where q is the GRF-guided DDIM proposal and the density ratio is
+        computed analytically from the Gaussian DDIM transition kernels.
+
+        Args:
+            shape:               (K, C, H, W) — K is the number of particles.
+            ess_threshold:       resample when ESS < ess_threshold * K.
+            guidance_scale:      multiplier on the GRF analytic score (default 1.0).
+            return_all_timesteps: if True, also return intermediate states.
+
+        Returns:
+            samples:     [K, C, H, W] unnormalized kappa maps.
+            log_weights: [K] final unnormalized log-importance weights.
+        """
+        assert self.power_spectrum is not None, "power_spectrum must be set for TDS-GRF"
+        assert self.y_fft         is not None, "y_fft must be set for TDS-GRF"
+        assert self.sigma_n_sq    is not None, "sigma_n_sq must be set for TDS-GRF"
+
+        K, device = shape[0], self.device
+        total_timesteps    = self.num_timesteps
+        sampling_timesteps = self.sampling_timesteps
+        eta                = self.ddim_sampling_eta
+
+        times      = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
+        times      = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:]))
+
+        # Initialise K particles from the prior.
+        x_t = torch.randn(shape, device=device)
+
+        # Initial twisting function at t = T (analytic, no NN).
+        with torch.no_grad():
+            log_w = self._grf_marginal_lkl_per_particle(x_t, times[0])
+
+        ess_history = []
+        imgs        = [x_t] if return_all_timesteps else []
+
+        for time, time_next in tqdm(time_pairs, desc='TDS-GRF sampling loop'):
+            # ---- Conditionally resample ----
+            ess = self._compute_ess(log_w)
+            ess_history.append(ess)
+
+            if ess < ess_threshold * K:
+                indices = self._systematic_resample(log_w)
+                x_t     = x_t[indices].clone()
+                log_w   = torch.zeros(K, device=device)
+
+            # ---- NN forward pass (unconditional score, no grad) ----
+            time_cond = torch.full((K,), time, device=device, dtype=torch.long)
+            with torch.no_grad():
+                pred_noise, x_start = self.model_predictions(
+                    x_t, time_cond, clip_x_start=True, rederive_pred_noise=True
+                )
+
+            # ---- Old twisting function ψ_t(x_t) ----
+            with torch.no_grad():
+                log_twist_old = self._grf_marginal_lkl_per_particle(x_t, time)
+
+            # ---- Terminal step: x_0 = x_start, final weight update ----
+            if time_next < 0:
+                x_t = x_start
+                # At t=0: Γ_t → 0, total_var → σ_n², W_pred → 1 (α_t→1, σ_t²→0).
+                with torch.no_grad():
+                    log_twist_new = self._grf_marginal_lkl_per_particle(x_t, time)
+                log_w = log_w + log_twist_new - log_twist_old
+                break
+
+            # ---- DDIM parameters ----
+            alpha      = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+            alpha_t    = alpha / alpha_next   # single-step α
+
+            sigma = eta * (
+                (1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)
+            ).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+
+            # Unconditional DDIM mean.
+            mu_uncond = x_start * alpha_next.sqrt() + c * pred_noise  # [K, C, H, W]
+
+            # ---- Analytic GRF score ∇_{x_t} log p_G(x_t | y) ----
+            # Same formula as the grf_dps branch in ddim_sample_posterior.
+            with torch.no_grad():
+                alpha_t_bar = self.sqrt_alphas_cumprod[time]
+                sigma_t_sq  = 1.0 - self.alphas_cumprod[time]
+                x_t_fft     = torch.fft.rfft2(x_t, norm='ortho')
+                sigma_post  = 1.0 / (
+                    1.0 / self.sigma_n_sq
+                    + alpha_t_bar ** 2 / sigma_t_sq
+                    + 1.0 / self.power_spectrum
+                )
+                mu_fft = sigma_post * (
+                    self.y_fft / self.sigma_n_sq
+                    + alpha_t_bar * x_t_fft / sigma_t_sq
+                )
+                score_fft = (
+                    (alpha_t_bar / sigma_t_sq) * mu_fft
+                    - x_t_fft / sigma_t_sq
+                    + x_t_fft / (alpha_t_bar ** 2 * self.power_spectrum + sigma_t_sq)
+                )
+                grf_score = torch.fft.irfft2(
+                    score_fft, s=(shape[-2], shape[-1]), norm='ortho'
+                )  # [K, C, H, W]
+
+            # ---- Guided proposal step ----
+            noise     = torch.randn(shape, device=device)
+
+            if time > 0 and sigma > 1e-8:
+                # Proposal: ascend the GRF log-likelihood.
+                grf_shift   = guidance_scale * (1 - alpha_t) * grf_score  # [K, C, H, W]
+                mu_proposal = mu_uncond + grf_shift
+                x_next      = mu_proposal + sigma * noise
+
+                # log p_uncond(x_next | x_t) − log q(x_next | x_t)
+                # = −noise·grf_shift/σ − ||grf_shift||²/(2σ²)
+                dot_noise_shift   = (noise * grf_shift).sum(dim=(1, 2, 3))   # [K]
+                dot_sq_shift      = (grf_shift ** 2).sum(dim=(1, 2, 3))      # [K]
+                log_density_ratio = (
+                    -dot_noise_shift / sigma - dot_sq_shift / (2 * sigma ** 2)
+                )
+            else:
+                x_next            = mu_uncond + sigma * noise
+                log_density_ratio = torch.zeros(K, device=device)
+
+            # ---- New twisting function ψ_{t−1}(x_next) ----
+            with torch.no_grad():
+                log_twist_new = self._grf_marginal_lkl_per_particle(x_next, time_next)
+
+            # ---- Weight update ----
+            log_w = log_w + log_density_ratio + log_twist_new - log_twist_old
+
+            x_t = x_next.detach()
+            if return_all_timesteps:
+                imgs.append(x_t)
+
+        self.tds_ess_history = ess_history
+
+        ret = self.unnormalize(x_t)
+        if return_all_timesteps:
+            ret = torch.stack([self.unnormalize(img) for img in imgs], dim=1)
+        return ret, log_w.detach()
+
+    def sample_tds_grf(self, n_particles=8, ess_threshold=0.5, guidance_scale=1.0,
+                       return_all_timesteps=False):
+        """Draw posterior samples using TDS with the analytic GRF twisting function.
+
+        Args:
+            n_particles:          number of SMC particles K.
+            ess_threshold:        resample when ESS < ess_threshold * K.
+            guidance_scale:       multiplier on the GRF analytic score.
+            return_all_timesteps: return intermediate states too.
+
+        Returns:
+            samples:     [K, C, H, W] unnormalized kappa maps.
+            log_weights: [K] final log-importance weights.
+        """
+        (h, w), channels = self.image_size, self.channels
+        shape = (n_particles, channels, h, w)
+        return self.ddim_sample_tds_grf(
+            shape,
+            ess_threshold=ess_threshold,
+            guidance_scale=guidance_scale,
+            return_all_timesteps=return_all_timesteps,
+        )
+
+    def _compute_identity_lkl_per_particle(self, x_start):
+        """Twisting function for TDS with identity forward model.
+
+        Evaluates log p(y | x̂₀) = −||y − x̂₀||² / (2 σ_n²) per particle,
+        where y is the pixel-space observation (self.y_observation_norm) and
+        x̂₀ is the Tweedie denoised estimate.  No gradient is tracked.
+
+        Args:
+            x_start: Tweedie estimate [K, C, H, W] in [-1, 1] normalized space.
+
+        Returns:
+            log_lkl: [K] per-particle log-likelihoods (no gradient).
+        """
+        with torch.no_grad():
+            resid   = self.y_observation_norm.unsqueeze(0) - x_start   # [K, C, H, W]
+            log_lkl = -(resid ** 2).sum(dim=(1, 2, 3)) / (2.0 * self.sigma_n_sq)
+        return log_lkl
+
+    def ddim_sample_tds_dps_identity(self, shape, ess_threshold=0.5,
+                                     return_all_timesteps=False):
+        """TDS with identity forward model and DPS (Tweedie) twisting function.
+
+        This is the SMC-corrected version of the DPS-identity sampler.  The
+        twisting function is the pixel-space Gaussian likelihood evaluated at
+        the Tweedie denoised estimate,
+
+            ψ_t(x_t) = log p(y | x̂₀(x_t, t)) = −||y − x̂₀||² / (2 σ_n²),
+
+        which is identical to the DPS-identity proposal objective.  The SMC
+        importance weights correct for the approximation error in using this as
+        a proxy for the true marginal likelihood p_θ(y | x_t).
+
+        Both the proposal gradient (backprop of ||y − x̂₀||² through the NN)
+        and the new-state twisting function (separate no-grad forward pass at
+        x_next) require a NN forward pass per step.
+
+        Args:
+            shape:               (K, C, H, W) — K is the number of particles.
+            ess_threshold:       resample when ESS < ess_threshold * K.
+            return_all_timesteps: if True, also return intermediate states.
+
+        Returns:
+            samples:     [K, C, H, W] unnormalized kappa maps.
+            log_weights: [K] final unnormalized log-importance weights.
+        """
+        assert self.y_observation_norm is not None, \
+            "y_observation_norm must be set for TDS-DPS-identity"
+        assert self.sigma_n_sq is not None, \
+            "sigma_n_sq must be set for TDS-DPS-identity"
+
+        K, device = shape[0], self.device
+        total_timesteps    = self.num_timesteps
+        sampling_timesteps = self.sampling_timesteps
+        eta                = self.ddim_sampling_eta
+
+        times      = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
+        times      = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:]))
+
+        # Initialise K particles from the prior.
+        x_t = torch.randn(shape, device=device)
+
+        # Initial twisting function at t = T: needs NN forward pass for x̂₀.
+        with torch.no_grad():
+            tc_init = torch.full((K,), times[0], device=device, dtype=torch.long)
+            _, x_start_init = self.model_predictions(
+                x_t, tc_init, clip_x_start=True, rederive_pred_noise=True
+            )
+        log_w = self._compute_identity_lkl_per_particle(x_start_init)
+
+        ess_history = []
+        imgs        = [x_t] if return_all_timesteps else []
+
+        for time, time_next in tqdm(time_pairs, desc='TDS-DPS-identity sampling loop'):
+            # ---- Conditionally resample ----
+            ess = self._compute_ess(log_w)
+            ess_history.append(ess)
+
+            if ess < ess_threshold * K:
+                indices = self._systematic_resample(log_w)
+                x_t     = x_t[indices].clone()
+                log_w   = torch.zeros(K, device=device)
+
+            # ---- NN forward pass with backprop for DPS proposal gradient ----
+            x_t_grad  = x_t.detach().requires_grad_(True)
+            time_cond = torch.full((K,), time, device=device, dtype=torch.long)
+            pred_noise, x_start = self.model_predictions(
+                x_t_grad, time_cond, clip_x_start=True, rederive_pred_noise=True
+            )
+
+            # Old twisting function ψ_t(x_t) — value only, detached.
+            log_twist_old = self._compute_identity_lkl_per_particle(x_start.detach())
+
+            # ---- Terminal step: x_0 = x_start, final weight update ----
+            if time_next < 0:
+                x_t = x_start.detach()
+                log_twist_new = self._compute_identity_lkl_per_particle(x_t)
+                log_w = log_w + log_twist_new - log_twist_old
+                break
+
+            # ---- DPS proposal gradient via backprop ----
+            # grad_log_lkl = ∂||y − x̂₀||²/∂x_t  (gradient of negative log-likelihood)
+            residual_sq = (
+                (self.y_observation_norm.unsqueeze(0) - x_start) ** 2
+                / self.sigma_n_sq
+            ).sum()
+            residual_sq.backward()
+            grad_log_lkl = x_t_grad.grad.detach()   # [K, C, H, W]
+
+            # ---- DDIM step parameters ----
+            alpha      = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+            alpha_t    = alpha / alpha_next
+
+            sigma = eta * (
+                (1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)
+            ).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+
+            mu_uncond = (
+                x_start.detach() * alpha_next.sqrt() + c * pred_noise.detach()
+            )   # [K, C, H, W]
+            noise = torch.randn(shape, device=device)
+
+            if time > 0 and sigma > 1e-8:
+                # Proposal: descend the residual (= ascend the log-likelihood).
+                # Same sign convention as ddim_sample_tds.
+                lkl_shift   = (1 - alpha_t) * grad_log_lkl
+                mu_proposal = mu_uncond - lkl_shift
+                x_next      = mu_proposal + sigma * noise
+
+                # log p_uncond(x_next | x_t) − log q(x_next | x_t)
+                dot_noise_shift   = (noise * lkl_shift).sum(dim=(1, 2, 3))   # [K]
+                dot_sq_shift      = (lkl_shift ** 2).sum(dim=(1, 2, 3))      # [K]
+                log_density_ratio = (
+                    dot_noise_shift / sigma - dot_sq_shift / (2 * sigma ** 2)
+                )
+            else:
+                x_next            = mu_uncond + sigma * noise
+                log_density_ratio = torch.zeros(K, device=device)
+
+            # ---- New twisting function ψ_{t−1}(x_next) — separate no-grad pass ----
+            with torch.no_grad():
+                tc_next = torch.full((K,), time_next, device=device, dtype=torch.long)
+                _, x_start_next = self.model_predictions(
+                    x_next, tc_next, clip_x_start=True, rederive_pred_noise=True
+                )
+            log_twist_new = self._compute_identity_lkl_per_particle(x_start_next)
+
+            # ---- Weight update ----
+            log_w = log_w + log_density_ratio + log_twist_new - log_twist_old
+
+            x_t = x_next.detach()
+            if return_all_timesteps:
+                imgs.append(x_t)
+
+        self.tds_ess_history = ess_history
+
+        ret = self.unnormalize(x_t)
+        if return_all_timesteps:
+            ret = torch.stack([self.unnormalize(img) for img in imgs], dim=1)
+        return ret, log_w.detach()
+
+    def sample_tds_dps_identity(self, n_particles=8, ess_threshold=0.5,
+                                return_all_timesteps=False):
+        """Draw posterior samples using TDS with the DPS identity twisting function.
+
+        Args:
+            n_particles:          number of SMC particles K.
+            ess_threshold:        resample when ESS < ess_threshold * K.
+            return_all_timesteps: return intermediate states too.
+
+        Returns:
+            samples:     [K, C, H, W] unnormalized kappa maps.
+            log_weights: [K] final log-importance weights.
+        """
+        (h, w), channels = self.image_size, self.channels
+        shape = (n_particles, channels, h, w)
+        return self.ddim_sample_tds_dps_identity(
+            shape,
+            ess_threshold=ess_threshold,
+            return_all_timesteps=return_all_timesteps,
+        )
+
     def compute_maximum_likelihood_map(self, noisy_image, sigma_noise, survey_mask,
                                    learning_rate=1e-3, num_iterations=1000, 
                                    verbose=True):
@@ -1558,28 +2029,19 @@ class GaussianDiffusion(Module):
 
 # dataset classes
 class WLDataset(Dataset):
-    def __init__(self, folder, KAPPA_MIN, KAPPA_MAX, exp_transform=True, N_patches=100000):
+    def __init__(self, folder, KAPPA_MIN, KAPPA_MAX, N_patches=100000):
         super().__init__()
         self.N_patches = N_patches
         self.folder = folder
         self.kappa_min = KAPPA_MIN
         self.kappa_max = KAPPA_MAX
-        self.exp_transform = exp_transform
-        if(self.exp_transform):
-            self.shift = 1.1 * self.kappa_min
-            self.y_min = np.log(self.kappa_min - self.shift)
-            self.y_max = np.log(self.kappa_max - self.shift)
 
     def __len__(self):
         return self.N_patches
 
     def __getitem__(self, index):
         kappa = np.load(self.folder + '/%d.npy'%(index+1))
-        if(self.exp_transform):
-            y = np.log(kappa - self.shift)
-            train_map = (y - self.y_min) / (self.y_max - self.y_min)
-        else:
-            train_map = (kappa - self.kappa_min) / (self.kappa_max - self.kappa_min)
+        train_map = (kappa - self.kappa_min) / (self.kappa_max - self.kappa_min)
         return train_map.astype(np.float32)
 
 # trainer class
@@ -1650,7 +2112,6 @@ class Trainer:
         self.ds = WLDataset(folder,
                             diffusion_model.kappa_min.cpu().numpy(),
                             diffusion_model.kappa_max.cpu().numpy(),
-                            exp_transform=diffusion_model.exp_transform,
                             N_patches=n_patches)
 
         assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'
